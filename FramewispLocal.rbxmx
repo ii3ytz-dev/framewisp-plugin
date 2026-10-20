@@ -1,0 +1,1719 @@
+<roblox version="4"><External>null</External><External>nil</External><Item class="Script" referent="RBX1"><Properties><ProtectedString name="Source"><![CDATA[--!strict
+-- Framewisp Local — Figma to Roblox Studio importer and live-sync companion.
+
+local HttpService = game:GetService("HttpService")
+local Selection = game:GetService("Selection")
+local StarterGui = game:GetService("StarterGui")
+local StarterPlayer = game:GetService("StarterPlayer")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ChangeHistoryService = game:GetService("ChangeHistoryService")
+
+local toolbar = plugin:CreateToolbar("Framewisp Local")
+local importButton = toolbar:CreateButton("Framewisp Local", "Import a Figma UI or connect Live Sync", "rbxassetid://4458901886")
+local toolsButton = toolbar:CreateButton("UI Tools", "Move, resize and convert the selected GUI object", "rbxassetid://4458901886")
+
+local widgetInfo = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Right, false, false, 330, 530, 280, 360)
+local widget = plugin:CreateDockWidgetPluginGui("FramewispLocalDock", widgetInfo)
+widget.Title = "Framewisp Local"
+
+local COLORS = {
+    bg = Color3.fromRGB(13, 8, 22),
+    panel = Color3.fromRGB(24, 17, 35),
+    panel2 = Color3.fromRGB(35, 25, 49),
+    border = Color3.fromRGB(57, 43, 73),
+    text = Color3.fromRGB(247, 241, 255),
+    muted = Color3.fromRGB(169, 156, 181),
+    accent = Color3.fromRGB(199, 164, 238),
+    accentDark = Color3.fromRGB(74, 52, 95),
+    danger = Color3.fromRGB(250, 143, 157),
+}
+
+local function new(className: string, properties: {[string]: any}?, parent: Instance?): Instance
+    local instance = Instance.new(className)
+    if properties then
+        for key, value in pairs(properties) do
+            local target: any = instance
+            target[key] = value
+        end
+    end
+    if parent then instance.Parent = parent end
+    return instance
+end
+
+local root = new("Frame", { BackgroundColor3 = COLORS.bg, BorderSizePixel = 0, Size = UDim2.fromScale(1, 1) }, widget) :: Frame
+local padding = new("UIPadding", { PaddingTop = UDim.new(0, 12), PaddingBottom = UDim.new(0, 12), PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12) }, root)
+local layout = new("UIListLayout", { Padding = UDim.new(0, 8), FillDirection = Enum.FillDirection.Vertical, SortOrder = Enum.SortOrder.LayoutOrder }, root)
+
+local function label(text: string, height: number, color: Color3?, size: number?): TextLabel
+    return new("TextLabel", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, height), Font = Enum.Font.Gotham, Text = text, TextColor3 = color or COLORS.text, TextSize = size or 12, TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true }, root) :: TextLabel
+end
+
+local title = label("✣  FRAMEWISP LOCAL", 27, COLORS.text, 15)
+title.Font = Enum.Font.GothamBold
+local subtitle = label("Figma → Roblox Studio", 18, COLORS.muted, 10)
+
+local tabRow = new("Frame", { BackgroundColor3 = COLORS.panel, BorderSizePixel = 0, Size = UDim2.new(1, 0, 0, 34) }, root) :: Frame
+new("UICorner", { CornerRadius = UDim.new(0, 7) }, tabRow)
+local tabLayout = new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, HorizontalAlignment = Enum.HorizontalAlignment.Center, Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, tabRow)
+local tabPadding = new("UIPadding", { PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4), PaddingLeft = UDim.new(0, 4), PaddingRight = UDim.new(0, 4) }, tabRow)
+
+local function button(parent: Instance, text: string, widthScale: number): TextButton
+    local item = new("TextButton", { AutoButtonColor = false, BackgroundColor3 = COLORS.panel2, BorderSizePixel = 0, Size = UDim2.new(widthScale, -4, 1, 0), Font = Enum.Font.GothamMedium, Text = text, TextColor3 = COLORS.text, TextSize = 11 }, parent) :: TextButton
+    new("UICorner", { CornerRadius = UDim.new(0, 6) }, item)
+    return item
+end
+
+local codeTab = button(tabRow, "Code", 0.5)
+local liveTab = button(tabRow, "Live", 0.5)
+local mode = "code"
+
+local placementRow = new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 30) }, root) :: Frame
+local placementLayout = new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }, placementRow)
+local fitPlacement = button(placementRow, "Fit & centre", 0.5)
+local exactPlacement = button(placementRow, "Exact artboard", 0.5)
+local placementMode = "fit"
+
+local codePanel = new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 110) }, root) :: Frame
+local codeLayout = new("UIListLayout", { Padding = UDim.new(0, 7), SortOrder = Enum.SortOrder.LayoutOrder }, codePanel)
+local codeInput = new("TextBox", { BackgroundColor3 = COLORS.panel2, BorderSizePixel = 0, ClearTextOnFocus = false, PlaceholderText = "6-character code", PlaceholderColor3 = COLORS.muted, Size = UDim2.new(1, 0, 0, 38), Font = Enum.Font.Code, Text = "", TextColor3 = COLORS.text, TextSize = 18, TextXAlignment = Enum.TextXAlignment.Center }, codePanel) :: TextBox
+new("UICorner", { CornerRadius = UDim.new(0, 7) }, codeInput)
+local importCodeButton = button(codePanel, "Import to Studio", 1)
+importCodeButton.Size = UDim2.new(1, 0, 0, 38)
+
+local livePanel = new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 150), Visible = false }, root) :: Frame
+local liveLayout = new("UIListLayout", { Padding = UDim.new(0, 7), SortOrder = Enum.SortOrder.LayoutOrder }, livePanel)
+local liveInput = new("TextBox", { BackgroundColor3 = COLORS.panel2, BorderSizePixel = 0, ClearTextOnFocus = false, PlaceholderText = "L-XXXXXX", PlaceholderColor3 = COLORS.muted, Size = UDim2.new(1, 0, 0, 38), Font = Enum.Font.Code, Text = "", TextColor3 = COLORS.text, TextSize = 18, TextXAlignment = Enum.TextXAlignment.Center }, livePanel) :: TextBox
+new("UICorner", { CornerRadius = UDim.new(0, 7) }, liveInput)
+local connectButton = button(livePanel, "Connect", 1)
+connectButton.Size = UDim2.new(1, 0, 0, 36)
+local autoButton = button(livePanel, "Auto-sync: On", 1)
+autoButton.Size = UDim2.new(1, 0, 0, 32)
+
+local relayLabel = label("Relay: http://127.0.0.1:8790", 18, COLORS.muted, 10)
+local status = label("Ready.", 34, COLORS.muted, 11)
+local divider = new("Frame", { BackgroundColor3 = COLORS.border, BorderSizePixel = 0, Size = UDim2.new(1, 0, 0, 1) }, root)
+local toolsTitle = label("UI Tools", 23, COLORS.text, 13)
+toolsTitle.Font = Enum.Font.GothamBold
+local selectedLabel = label("Select a GuiObject to edit.", 30, COLORS.muted, 10)
+local nudgeRow = new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 31) }, root) :: Frame
+local nudgeLayout = new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }, nudgeRow)
+local left = button(nudgeRow, "←", 0.16)
+local up = button(nudgeRow, "↑", 0.16)
+local down = button(nudgeRow, "↓", 0.16)
+local right = button(nudgeRow, "→", 0.16)
+local smaller = button(nudgeRow, "− size", 0.18)
+local larger = button(nudgeRow, "+ size", 0.18)
+local classRow = new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 64) }, root) :: Frame
+local classGrid = new("UIGridLayout", { CellPadding = UDim2.fromOffset(5, 5), CellSize = UDim2.new(1/3, -4, 0, 29), SortOrder = Enum.SortOrder.LayoutOrder }, classRow)
+
+local relayUrl = "http://127.0.0.1:8790"
+local connected = false
+local autoSync = true
+local liveRevision = 0
+local importedRoot: Instance? = nil
+
+local function setStatus(text: string, isError: boolean?)
+    status.Text = text
+    status.TextColor3 = isError and COLORS.danger or COLORS.muted
+end
+
+local function httpGet(path: string): any
+    local success, result = pcall(function() return HttpService:GetAsync(relayUrl .. path, true) end)
+    if not success then error("Local relay unavailable. Run npm run dev, then allow HTTP requests if Studio asks.") end
+    return HttpService:JSONDecode(result)
+end
+
+local function clamp01(value: number): number return math.clamp(value, 0, 1) end
+local function color3(value: any): Color3
+    if typeof(value) ~= "table" then return Color3.new(1, 1, 1) end
+    return Color3.new(clamp01(tonumber(value.r) or 1), clamp01(tonumber(value.g) or 1), clamp01(tonumber(value.b) or 1))
+end
+
+local function hasTag(node: any, tag: string): boolean
+    for _, value in ipairs(node.tags or {}) do if value == tag then return true end end
+    return false
+end
+
+local function enumByName(enumType: any, name: string, fallback: any): any
+    local ok, value = pcall(function() return enumType[name] end)
+    return ok and value or fallback
+end
+
+local function cleanInstanceName(name: string): string
+    local value = string.gsub(name, "[^%w_ ]", "")
+    value = string.gsub(value, "^%s+", "")
+    value = string.gsub(value, "%s+$", "")
+    return value ~= "" and value or "Layer"
+end
+
+local function applyFill(instance: GuiObject, paints: {any})
+    local paint = paints and paints[1]
+    if not paint then
+        instance.BackgroundTransparency = 1
+        return
+    end
+    if paint.type == "solid" then
+        instance.BackgroundColor3 = color3(paint.color)
+        instance.BackgroundTransparency = 1 - clamp01(tonumber(paint.color.a) or 1)
+    elseif paint.type == "linear" then
+        instance.BackgroundColor3 = Color3.new(1, 1, 1)
+        instance.BackgroundTransparency = 0
+        local gradient = new("UIGradient", { Rotation = tonumber(paint.angle) or 0 }, instance) :: UIGradient
+        local keys = {}
+        local trans = {}
+        for _, stop in ipairs(paint.stops or {}) do
+            table.insert(keys, ColorSequenceKeypoint.new(clamp01(tonumber(stop.position) or 0), color3(stop.color)))
+            table.insert(trans, NumberSequenceKeypoint.new(clamp01(tonumber(stop.position) or 0), 1 - clamp01(tonumber(stop.color.a) or 1)))
+        end
+        if #keys >= 2 then gradient.Color = ColorSequence.new(keys); gradient.Transparency = NumberSequence.new(trans) end
+    end
+end
+
+local FONT_MAP = {
+    Inter = Enum.Font.Gotham,
+    Arial = Enum.Font.Arial,
+    Roboto = Enum.Font.Roboto,
+    Gotham = Enum.Font.Gotham,
+    Montserrat = Enum.Font.Montserrat,
+    Nunito = Enum.Font.Nunito,
+    Fredoka = Enum.Font.FredokaOne,
+}
+
+local function roleClass(node: any): string
+    if node.role == "text" then return "TextLabel" end
+    if node.role == "textbox" then return "TextBox" end
+    if node.role == "button" then return (node.text and "TextButton" or "ImageButton") end
+    if node.role == "scroll" then return "ScrollingFrame" end
+    if node.role == "image" or node.imageHash then return hasTag(node, "_button") and "ImageButton" or "ImageLabel" end
+    if node.role == "canvas" then return "CanvasGroup" end
+    return "Frame"
+end
+
+local generatedById: {[string]: Instance} = {}
+local currentDocument: any = nil
+
+local function findGenerated(parent: Instance, sourceId: string, className: string): Instance?
+    for _, child in ipairs(parent:GetChildren()) do
+        if child:GetAttribute("FWSourceId") == sourceId and child.ClassName == className then return child end
+    end
+    return nil
+end
+
+local function setAttributes(instance: Instance, node: any)
+    instance:SetAttribute("FWSourceId", node.id)
+    instance:SetAttribute("FWTags", HttpService:JSONEncode(node.tags or {}))
+    for key, value in pairs(node.fx or {}) do
+        if typeof(value) == "number" or typeof(value) == "string" or typeof(value) == "boolean" then instance:SetAttribute(key, value) end
+    end
+    for key, value in pairs(node.params or {}) do instance:SetAttribute("FWParam_" .. key, tostring(value)) end
+end
+
+local function reconcileNode(parent: Instance, node: any, parentWidth: number, parentHeight: number): Instance
+    local className = roleClass(node)
+    local instance = findGenerated(parent, node.id, className)
+    if not instance then
+        for _, child in ipairs(parent:GetChildren()) do
+            if child:GetAttribute("FWSourceId") == node.id and not child:IsA("LuaSourceContainer") then child:Destroy() end
+        end
+        instance = new(className, nil, parent)
+    end
+    instance.Name = cleanInstanceName(node.cleanName or node.name)
+    setAttributes(instance, node)
+    generatedById[node.id] = instance
+
+    if instance:IsA("GuiObject") then
+        instance.Position = UDim2.fromScale((tonumber(node.x) or 0) / math.max(parentWidth, 1), (tonumber(node.y) or 0) / math.max(parentHeight, 1))
+        instance.Size = UDim2.fromScale((tonumber(node.width) or 0) / math.max(parentWidth, 1), (tonumber(node.height) or 0) / math.max(parentHeight, 1))
+        instance.Rotation = tonumber(node.rotation) or 0
+        instance.Visible = node.visible ~= false
+        instance.ClipsDescendants = node.clipsContent == true
+        applyFill(instance, node.fills or {})
+        if instance:IsA("ImageLabel") or instance:IsA("ImageButton") then
+            local asset = currentDocument and currentDocument.assets and currentDocument.assets[node.imageHash]
+            instance.Image = asset and asset.robloxAssetId and ("rbxassetid://" .. tostring(asset.robloxAssetId)) or ""
+            local imagePaint = nil
+            for _, paint in ipairs(node.fills or {}) do if paint.type == "image" then imagePaint = paint; break end end
+            local scaleMode = imagePaint and imagePaint.scaleMode or "FIT"
+            instance.ScaleType = scaleMode == "TILE" and Enum.ScaleType.Tile or (scaleMode == "FILL" or scaleMode == "CROP") and Enum.ScaleType.Crop or Enum.ScaleType.Fit
+            if not asset or not asset.robloxAssetId then instance.BackgroundColor3 = Color3.fromRGB(65, 49, 82); instance.BackgroundTransparency = 0.25 end
+        end
+        if instance:IsA("TextLabel") or instance:IsA("TextButton") or instance:IsA("TextBox") then
+            local textData = node.text or {}
+            instance.Text = instance:IsA("TextBox") and "" or tostring(textData.characters or "")
+            if instance:IsA("TextBox") then instance.PlaceholderText = tostring(textData.characters or "") end
+            instance.Font = FONT_MAP[textData.fontFamily] or Enum.Font.Gotham
+            instance.TextSize = tonumber(textData.fontSize) or 16
+            instance.TextColor3 = node.fills and node.fills[1] and node.fills[1].type == "solid" and color3(node.fills[1].color) or Color3.new(1, 1, 1)
+            instance.TextTransparency = node.fills and node.fills[1] and node.fills[1].type == "solid" and (1 - clamp01(tonumber(node.fills[1].color.a) or 1)) or 0
+            instance.TextXAlignment = enumByName(Enum.TextXAlignment, textData.alignHorizontal, Enum.TextXAlignment.Left)
+            instance.TextYAlignment = enumByName(Enum.TextYAlignment, textData.alignVertical, Enum.TextYAlignment.Center)
+            instance.TextWrapped = true
+            instance.TextScaled = hasTag(node, "_fit")
+            instance.BackgroundTransparency = node.role == "text" and 1 or instance.BackgroundTransparency
+        end
+        if node.cornerRadius then
+            local radius = typeof(node.cornerRadius) == "number" and node.cornerRadius or node.cornerRadius[1]
+            local corner = instance:FindFirstChildOfClass("UICorner") or new("UICorner", nil, instance)
+            corner.CornerRadius = UDim.new((tonumber(radius) or 0) / math.max(tonumber(node.width) or 1, tonumber(node.height) or 1), 0)
+        end
+        if node.stroke and node.stroke.paints and node.stroke.paints[1] then
+            local stroke = instance:FindFirstChildOfClass("UIStroke") or new("UIStroke", nil, instance)
+            local paint = node.stroke.paints[1]
+            stroke.Thickness = tonumber(node.stroke.weight) or 1
+            if paint.type == "solid" then (stroke :: UIStroke).Color = color3(paint.color); (stroke :: UIStroke).Transparency = 1 - clamp01(tonumber(paint.color.a) or 1) end
+        end
+        if hasTag(node, "_aspect") then
+            local aspect = instance:FindFirstChildOfClass("UIAspectRatioConstraint") or new("UIAspectRatioConstraint", nil, instance)
+            aspect.AspectRatio = (tonumber(node.width) or 1) / math.max(tonumber(node.height) or 1, 1)
+        end
+    end
+
+    local liveIds: {[string]: boolean} = {}
+    for _, childNode in ipairs(node.children or {}) do
+        liveIds[childNode.id] = true
+        local child = reconcileNode(instance, childNode, tonumber(node.width) or 1, tonumber(node.height) or 1)
+        if child:IsA("GuiObject") then child.LayoutOrder = _ end
+    end
+    for _, child in ipairs(instance:GetChildren()) do
+        local sourceId = child:GetAttribute("FWSourceId")
+        if sourceId and not liveIds[sourceId] and not child:IsA("LuaSourceContainer") then child:Destroy() end
+    end
+
+    local layoutData = node.layout
+    local wantsGrid = layoutData and layoutData.kind == "grid" or hasTag(node, "_grid")
+    local wantsList = layoutData and layoutData.kind == "list" or hasTag(node, "_list")
+    local oldGrid = instance:IsA("GuiObject") and instance:FindFirstChildOfClass("UIGridLayout") or nil
+    local oldList = instance:IsA("GuiObject") and instance:FindFirstChildOfClass("UIListLayout") or nil
+    if oldGrid and not wantsGrid and oldGrid:GetAttribute("FWGenerated") then oldGrid:Destroy() end
+    if oldList and not wantsList and oldList:GetAttribute("FWGenerated") then oldList:Destroy() end
+    if instance:IsA("GuiObject") and wantsGrid and #(node.children or {}) >= 2 then
+        local first = node.children[1]
+        local second = node.children[2]
+        local grid = instance:FindFirstChildOfClass("UIGridLayout") or new("UIGridLayout", nil, instance)
+        grid:SetAttribute("FWGenerated", true)
+        grid.CellSize = UDim2.fromScale((tonumber(layoutData and layoutData.cellWidth) or tonumber(first.width) or 1) / math.max(tonumber(node.width) or 1, 1), (tonumber(layoutData and layoutData.cellHeight) or tonumber(first.height) or 1) / math.max(tonumber(node.height) or 1, 1))
+        grid.CellPadding = UDim2.fromScale((tonumber(layoutData and layoutData.gapX) or math.max(0, (tonumber(second.x) or 0) - (tonumber(first.x) or 0) - (tonumber(first.width) or 0))) / math.max(tonumber(node.width) or 1, 1), (tonumber(layoutData and layoutData.gapY) or math.max(0, (tonumber(second.y) or 0) - (tonumber(first.y) or 0) - (tonumber(first.height) or 0))) / math.max(tonumber(node.height) or 1, 1))
+        grid.SortOrder = Enum.SortOrder.LayoutOrder
+        grid.FillDirectionMaxCells = tonumber(layoutData and layoutData.columns) or 0
+    elseif instance:IsA("GuiObject") and wantsList and #(node.children or {}) >= 2 then
+        local first = node.children[1]
+        local second = node.children[2]
+        local horizontal = layoutData and layoutData.direction == "horizontal" or math.abs((tonumber(second.x) or 0) - (tonumber(first.x) or 0)) > math.abs((tonumber(second.y) or 0) - (tonumber(first.y) or 0))
+        local list = instance:FindFirstChildOfClass("UIListLayout") or new("UIListLayout", nil, instance)
+        list:SetAttribute("FWGenerated", true)
+        list.FillDirection = horizontal and Enum.FillDirection.Horizontal or Enum.FillDirection.Vertical
+        local gap = tonumber(layoutData and layoutData.gap) or math.max(0, horizontal and ((tonumber(second.x) or 0) - (tonumber(first.x) or 0) - (tonumber(first.width) or 0)) or ((tonumber(second.y) or 0) - (tonumber(first.y) or 0) - (tonumber(first.height) or 0)))
+        list.Padding = UDim.new(gap / math.max(horizontal and (tonumber(node.width) or 1) or (tonumber(node.height) or 1), 1), 0)
+        list.SortOrder = Enum.SortOrder.LayoutOrder
+        local alignment = layoutData and layoutData.alignment or "start"
+        if horizontal then (list :: UIListLayout).VerticalAlignment = alignment == "center" and Enum.VerticalAlignment.Center or alignment == "end" and Enum.VerticalAlignment.Bottom or Enum.VerticalAlignment.Top
+        else (list :: UIListLayout).HorizontalAlignment = alignment == "center" and Enum.HorizontalAlignment.Center or alignment == "end" and Enum.HorizontalAlignment.Right or Enum.HorizontalAlignment.Left end
+    end
+
+    if instance:IsA("ScrollingFrame") then
+        local maxX, maxY = tonumber(node.width) or 0, tonumber(node.height) or 0
+        for _, childNode in ipairs(node.children or {}) do maxX = math.max(maxX, (childNode.x or 0) + (childNode.width or 0)); maxY = math.max(maxY, (childNode.y or 0) + (childNode.height or 0)) end
+        instance.CanvasSize = UDim2.fromScale(maxX / math.max(tonumber(node.width) or 1, 1), maxY / math.max(tonumber(node.height) or 1, 1))
+        instance.ScrollBarThickness = tonumber(node.fx and node.fx.scrollBar) or 6
+        instance.BackgroundTransparency = 1
+    end
+    return instance
+end
+
+local runtimeSource = [==[
+-- Framewisp Local bootstrap. Effect implementations live in sibling ModuleScripts.
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local modulesFolder = ReplicatedStorage:WaitForChild("FramewispEffects")
+local Shared = require(modulesFolder:WaitForChild("Shared"))
+local Resolver = require(modulesFolder:WaitForChild("Resolver"))
+local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
+local context = Shared.create(playerGui)
+
+local effects = {}
+for _, child in ipairs(modulesFolder:GetChildren()) do
+    if child:IsA("ModuleScript") and child.Name ~= "Shared" and child.Name ~= "Resolver" then
+        local ok, effect = pcall(require, child)
+        if ok and type(effect) == "table" and type(effect.tag) == "string" and type(effect.setup) == "function" then
+            effects[effect.tag] = effect
+        else
+            warn("Framewisp effect module failed:", child:GetFullName(), effect)
+        end
+    end
+end
+
+local installed = setmetatable({}, { __mode = "k" })
+local watching = setmetatable({}, { __mode = "k" })
+
+local function scan(object)
+    if not object:IsA("GuiObject") then return end
+    context:wireObject(object)
+    installed[object] = installed[object] or {}
+    local added = false
+    for tag, effect in pairs(effects) do
+        if not installed[object][tag] and Resolver.matches(context, object, effect) then
+            installed[object][tag] = true
+            added = true
+            local ok, message = pcall(effect.setup, context, object)
+            if not ok then warn("Framewisp effect setup failed:", tag, object:GetFullName(), message) end
+        end
+    end
+    if added and context.started and object.Visible then context:emit(object, "show") end
+    if not watching[object] then
+        watching[object] = true
+        object.AttributeChanged:Connect(function() scan(object) end)
+    end
+end
+
+for _, object in ipairs(context:objects()) do scan(object) end
+playerGui.DescendantAdded:Connect(function(object) task.defer(scan, object) end)
+
+context:finish()
+]==]
+
+local runtimeModules = {
+    ["Billboard"] = [========[return {
+    tag = "_billboard",
+    setup = function(ctx, object)
+        local gui = object:FindFirstAncestorOfClass("BillboardGui")
+        if not gui then return end
+        local width = tonumber(ctx:attr(object, "bbStuds", 8)) or 8
+        gui.Size = UDim2.fromScale(width, width * object.AbsoluteSize.Y / math.max(1, object.AbsoluteSize.X)); gui.AlwaysOnTop = ctx:attr(object, "bbTop", true)
+        pcall(function() gui.MaxDistance = tonumber(ctx:attr(object, "bbDist", 0)) or 0 end)
+    end,
+}]========],
+    ["Blink"] = [========[return {
+    tag = "_blink",
+    setup = function(ctx, object)
+        task.spawn(function()
+            task.wait(tonumber(ctx:attr(object, "blinkDelay", 0)) or 0)
+            while object.Parent do
+                ctx:tweenAlpha(object, ctx:attr(object, "blinkFade", .25), 0); task.wait(tonumber(ctx:attr(object, "blinkOn", 1.2)) or 1.2)
+                ctx:tweenAlpha(object, ctx:attr(object, "blinkFade", .25), 1); task.wait(tonumber(ctx:attr(object, "blinkOff", .8)) or .8)
+            end
+        end)
+    end,
+}]========],
+    ["Burst"] = [========[return {
+    tag = "_burst",
+    setup = function(ctx, button)
+        if not button:IsA("GuiButton") then return end
+        ctx:on(button, "activate", function()
+            local count = math.clamp(math.floor(tonumber(ctx:attr(button, "burstCount", 12)) or 12), 1, 60)
+            local duration = tonumber(ctx:attr(button, "burstTime", .6)) or .6
+            local reach = tonumber(ctx:attr(button, "burstDist", .6)) or .6
+            local minSize = tonumber(ctx:attr(button, "burstSize", 12)) or 12
+            local maxSize = tonumber(ctx:attr(button, "burstSizeMax", minSize)) or minSize
+            for index = 1, count do
+                local particle = Instance.new("Frame")
+                particle.Name = "FramewispBurst"; particle.AnchorPoint = Vector2.new(.5, .5); particle.Position = button.Position + UDim2.fromScale(button.Size.X.Scale / 2, button.Size.Y.Scale / 2) + UDim2.fromOffset(button.Size.X.Offset / 2, button.Size.Y.Offset / 2)
+                local size = minSize + math.random() * math.max(0, maxSize - minSize)
+                particle.Size = UDim2.fromOffset(size, size); particle.BackgroundColor3 = ctx:hex(ctx:attr(button, "burstColor", "#ffffff"), Color3.new(1, 1, 1)); particle.BackgroundTransparency = tonumber(ctx:attr(button, "burstAlpha", 0)) or 0
+                particle.BorderSizePixel = 0; particle.ZIndex = math.max(1, button.ZIndex - 1); particle.Parent = button.Parent
+                local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(1, 0); corner.Parent = particle
+                local angle = (index / count) * math.pi * 2 + math.random() * .2
+                local distance = math.max(button.AbsoluteSize.X, button.AbsoluteSize.Y) * reach * (.65 + math.random() * .35)
+                local properties = { Position = particle.Position + UDim2.fromOffset(math.cos(angle) * distance, math.sin(angle) * distance), BackgroundTransparency = 1, Rotation = ctx:attr(button, "burstSpin", false) and (tonumber(ctx:attr(button, "burstSpinSpeed", 360)) or 360) or 0 }
+                if ctx:attr(button, "burstShrink", true) then properties.Size = UDim2.fromOffset(0, 0) end
+                task.delay((index % 4) * .02, function() if particle.Parent then local animation = ctx:tween(particle, duration, properties); animation.Completed:Connect(function() particle:Destroy() end) end end)
+            end
+        end)
+    end,
+}]========],
+    ["Button"] = [========[return {
+    tag = "_button",
+    setup = function(ctx, button)
+        if not button:IsA("GuiButton") then return end
+        local baseScale = ctx:scale(button)
+        local function tint(on, amountKey)
+            local amount = tonumber(ctx:attr(button, amountKey, amountKey == "pressDim" and .62 or .8)) or .8
+            local targets = { button }
+            for _, child in ipairs(button:GetDescendants()) do if child:IsA("GuiObject") and not ctx:has(child, "_nodim") and not ctx:has(child, "_color") then table.insert(targets, child) end end
+            for _, target in ipairs(targets) do
+                local base = ctx:rememberValue(target, "buttonColor", ctx:color(target))
+                ctx:paint(target, on and Color3.new(base.R * amount, base.G * amount, base.B * amount) or base)
+            end
+        end
+        ctx:on(button, "enter", function() tint(true, "hoverDim"); ctx:playSound(button, "hoverSound") end)
+        ctx:on(button, "leave", function() tint(false, "hoverDim"); ctx:tween(baseScale, .15, { Scale = 1 }) end)
+        ctx:on(button, "down", function() tint(true, "pressDim"); ctx:tween(baseScale, .06, { Scale = tonumber(ctx:attr(button, "pressScale", .985)) or .985 }) end)
+        ctx:on(button, "up", function() tint(true, "hoverDim"); ctx:tween(baseScale, .12, { Scale = 1 }, Enum.EasingStyle.Back) end)
+        ctx:on(button, "activate", function() ctx:playSound(button, "clickSound") end)
+    end,
+}]========],
+    ["Card"] = [========[return {
+    tag = "_card",
+    setup = function(ctx, card)
+        card.Visible = false
+        local function matches(button)
+            local owner = card:GetAttribute("FWParam_card")
+            return owner and owner == button.Name or not owner and (card.Parent == button or card.Parent == button.Parent)
+        end
+        ctx:onGlobal("enter", function(button)
+            if not button:IsA("GuiButton") or not matches(button) then return end
+            task.delay(tonumber(ctx:attr(card, "cardDelay", .25)) or .25, function()
+                if not card.Parent then return end
+                card.Visible = true; card.Position = button.Position + UDim2.fromOffset(tonumber(ctx:attr(card, "cardX", 0)) or 0, tonumber(ctx:attr(card, "cardY", 0)) or 0); ctx:emit(card, "show")
+            end)
+        end)
+        ctx:onGlobal("leave", function(button) if matches(button) then task.delay(tonumber(ctx:attr(card, "cardHide", .15)) or .15, function() if card.Parent and not (ctx:attr(card, "cardSticky", true) and card:GetAttribute("FWHovered")) then card.Visible = false end end) end end)
+        card.MouseEnter:Connect(function() card:SetAttribute("FWHovered", true) end)
+        card.MouseLeave:Connect(function() card:SetAttribute("FWHovered", false) end)
+    end,
+}]========],
+    ["Cascade"] = [========[return {
+    tag = "_cascade",
+    setup = function(ctx, object)
+        ctx:on(object, "show", function()
+            local gap, index = (tonumber(ctx:attr(object, "cascadeGap", 70)) or 70) / 1000, 0
+            for _, child in ipairs(object:GetChildren()) do
+                if child:IsA("GuiObject") then
+                    local scale = ctx:scale(child); scale.Scale = 0
+                    task.delay(index * gap, function() if child.Parent then ctx:tween(scale, .35, { Scale = 1 }, Enum.EasingStyle.Back) end end)
+                    index += 1
+                end
+            end
+        end)
+    end,
+}]========],
+    ["Color"] = [========[return {
+    tag = "_color",
+    setup = function(ctx, object)
+        local button = ctx:buttonFor(object)
+        if not button and object:IsA("GuiButton") then button = object end
+        if not button then return end
+        local base = ctx:rememberValue(object, "hoverColor", ctx:color(object))
+        local property = (object:IsA("ImageLabel") or object:IsA("ImageButton")) and "ImageColor3" or (object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox")) and "TextColor3" or "BackgroundColor3"
+        ctx:on(button, "enter", function() ctx:tween(object, ctx:attr(object, "colorIn", .14), { [property] = ctx:hex(ctx:attr(object, "colorPick", "#ffffff"), base) }) end)
+        ctx:on(button, "leave", function() ctx:tween(object, ctx:attr(object, "colorOut", .25), { [property] = base }) end)
+    end,
+}]========],
+    ["Drift"] = [========[return {
+    tag = "_drift",
+    setup = function(ctx, object)
+        local base, travelled = object.Position, Vector2.zero
+        ctx.runService.RenderStepped:Connect(function(delta)
+            if not object.Parent then return end
+            local angle, speed = math.rad(tonumber(ctx:attr(object, "driftAngle", 270)) or 270), tonumber(ctx:attr(object, "driftSpeed", 40)) or 40
+            travelled += Vector2.new(math.sin(angle), -math.cos(angle)) * speed * delta
+            local width, height = math.max(1, object.AbsoluteSize.X), math.max(1, object.AbsoluteSize.Y)
+            travelled = Vector2.new(((travelled.X + width) % (width * 2)) - width, ((travelled.Y + height) % (height * 2)) - height)
+            object.Position = base + UDim2.fromOffset(travelled.X, travelled.Y)
+        end)
+    end,
+}]========],
+    ["Drop"] = [========[return {
+    tag = "_drop",
+    setup = function(ctx, object)
+        local function drop(target, delayTime)
+            task.delay(delayTime, function()
+                if not target.Parent then return end
+                local base = ctx:remember(target, "Position", "dropPosition") or target.Position
+                local distance = tonumber(ctx:attr(object, "dropHeight", 160)) or 160
+                target.Position = base - UDim2.fromOffset(0, distance)
+                if ctx:attr(object, "dropFade", true) then ctx:setAlpha(target, 1); ctx:tweenAlpha(target, ctx:attr(object, "dropTime", .6), 0) end
+                local animation = ctx:tween(target, ctx:attr(object, "dropTime", .6), { Position = base }, Enum.EasingStyle.Bounce)
+                animation.Completed:Connect(function() ctx:playSound(object, "dropSound") end)
+            end)
+        end
+        ctx:on(object, "show", function()
+            local delayTime = tonumber(ctx:attr(object, "dropDelay", 0)) or 0
+            if ctx:attr(object, "dropKids", false) then
+                local index = 0
+                for _, child in ipairs(object:GetChildren()) do if child:IsA("GuiObject") then drop(child, delayTime + index * (tonumber(ctx:attr(object, "dropStep", .06)) or .06)); index += 1 end end
+            else drop(object, delayTime) end
+        end)
+    end,
+}]========],
+    ["Fadein"] = [========[return {
+    tag = "_fadein",
+    setup = function(ctx, object)
+        ctx:on(object, "show", function()
+            task.delay(tonumber(ctx:attr(object, "fadeinDelay", 0)) or 0, function()
+                if not object.Parent then return end
+                ctx:setAlpha(object, 1)
+                ctx:tweenAlpha(object, ctx:attr(object, "fadeinTime", .35), 0)
+            end)
+        end)
+    end,
+}]========],
+    ["Fall"] = [========[return {
+    tag = "_fall",
+    setup = function(ctx, object)
+        object.Visible = false
+        task.spawn(function()
+            while object.Parent do
+                local copy = object:Clone()
+                for _, child in ipairs(copy:GetDescendants()) do if child:IsA("LuaSourceContainer") then child:Destroy() end end
+                copy.Name = "FramewispFallParticle"; copy:SetAttribute("FWTags", "[]"); copy.Visible = true; copy.AnchorPoint = Vector2.new(.5, .5); copy.Position = UDim2.fromScale(math.random(), -.15)
+                local minimum, maximum = tonumber(ctx:attr(object, "fallScale", .6)) or .6, tonumber(ctx:attr(object, "fallScaleMax", 1)) or 1
+                local size = minimum + math.random() * math.max(0, maximum - minimum)
+                copy.Size = UDim2.new(object.Size.X.Scale * size, object.Size.X.Offset * size, object.Size.Y.Scale * size, object.Size.Y.Offset * size); copy.Rotation += (math.random() * 2 - 1) * (tonumber(ctx:attr(object, "fallTilt", 40)) or 40); copy.Parent = object.Parent
+                ctx:setAlpha(copy, tonumber(ctx:attr(object, "fallAlpha", .75)) or .75)
+                local duration = tonumber(ctx:attr(object, "fallTime", 6)) or 6
+                local animation = ctx:tween(copy, duration, { Position = UDim2.fromScale(math.random(), 1.15), Rotation = copy.Rotation + (ctx:attr(object, "fallSpin", false) and (tonumber(ctx:attr(object, "fallSpinSpeed", 90)) or 90) * duration or 0) }, Enum.EasingStyle.Linear)
+                animation.Completed:Connect(function() copy:Destroy() end)
+                task.wait(duration / math.max(1, tonumber(ctx:attr(object, "fallCount", 12)) or 12))
+            end
+        end)
+    end,
+}]========],
+    ["Float"] = [========[return {
+    tag = "_float",
+    setup = function(ctx, object)
+        local base = object.Position
+        ctx.runService.RenderStepped:Connect(function()
+            if object.Parent then
+                local distance, speed = tonumber(ctx:attr(object, "floatDist", 8)) or 8, tonumber(ctx:attr(object, "floatSpeed", .6)) or .6
+                local angle = math.rad(tonumber(ctx:attr(object, "floatAngle", 0)) or 0)
+                local value = math.sin(time() * math.pi * 2 * speed) * distance / 2
+                object.Position = base + UDim2.fromOffset(math.sin(angle) * value, -math.cos(angle) * value)
+            end
+        end)
+    end,
+}]========],
+    ["Flow"] = [========[return {
+    tag = "_flow",
+    setup = function(ctx, object)
+        local gradients = {}
+        for _, child in ipairs(object:GetDescendants()) do if child:IsA("UIGradient") then table.insert(gradients, child) end end
+        for _, child in ipairs(object:GetChildren()) do if child:IsA("UIGradient") and not table.find(gradients, child) then table.insert(gradients, child) end end
+        if #gradients == 0 then local gradient = Instance.new("UIGradient"); gradient.Parent = object; table.insert(gradients, gradient) end
+        for _, gradient in ipairs(gradients) do
+            gradient.Rotation = tonumber(ctx:attr(object, "flowAngle", 0)) or 0; gradient.Offset = Vector2.new(tonumber(ctx:attr(object, "flowPhase", 0)) or 0, 0)
+            if tonumber(ctx:attr(object, "flowMode", 0)) == 1 then gradient.Color = ColorSequence.new({ ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 70, 90)), ColorSequenceKeypoint.new(.2, Color3.fromRGB(255, 220, 70)), ColorSequenceKeypoint.new(.4, Color3.fromRGB(70, 255, 130)), ColorSequenceKeypoint.new(.6, Color3.fromRGB(70, 200, 255)), ColorSequenceKeypoint.new(.8, Color3.fromRGB(150, 80, 255)), ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 70, 90)) }) end
+        end
+        ctx.runService.RenderStepped:Connect(function(delta)
+            if not object.Parent then return end
+            for _, gradient in ipairs(gradients) do
+                if tonumber(ctx:attr(object, "flowMove", 0)) == 1 then gradient.Rotation += (tonumber(ctx:attr(object, "flowRotate", 180)) or 180) * delta
+                else
+                    local angle, speed = math.rad(tonumber(ctx:attr(object, "flowDirection", 0)) or 0), tonumber(ctx:attr(object, "flowSpeed", .5)) or .5
+                    gradient.Offset += Vector2.new(math.cos(angle), math.sin(angle)) * speed * delta
+                    if math.abs(gradient.Offset.X) > 1 or math.abs(gradient.Offset.Y) > 1 then gradient.Offset = Vector2.new(gradient.Offset.X % 1, gradient.Offset.Y % 1) end
+                end
+            end
+        end)
+    end,
+}]========],
+    ["Focus"] = [========[return { tag = "_focus", setup = function(ctx, object) ctx:registerFocus(object) end }]========],
+    ["Gleam"] = [========[return {
+    tag = "_gleam",
+    setup = function(ctx, object)
+        local gradient = object:FindFirstChildOfClass("UIGradient") or Instance.new("UIGradient")
+        gradient.Name = "FramewispGleam"; gradient.Parent = object
+        gradient.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(.5, 0), NumberSequenceKeypoint.new(1, 1) })
+        task.spawn(function()
+            while object.Parent do
+                gradient.Offset = Vector2.new(-1, 0)
+                ctx:tween(gradient, ctx:attr(object, "gleamSpeed", .8), { Offset = Vector2.new(1, 0) }, Enum.EasingStyle.Linear).Completed:Wait()
+                task.wait(tonumber(ctx:attr(object, "gleamCooldown", 2)) or 2)
+            end
+        end)
+    end,
+}]========],
+    ["Glint"] = [========[return {
+    tag = "_glint",
+    setup = function(ctx, object)
+        local button = ctx:buttonFor(object)
+        if not button then return end
+        local parent = object.Parent
+        if parent and parent:IsA("GuiObject") then parent.ClipsDescendants = true end
+        local base = object.Position
+        object.Visible = true
+        ctx:on(button, "enter", function()
+            object.Position = UDim2.new(base.X.Scale - 1.2, base.X.Offset, base.Y.Scale, base.Y.Offset)
+            ctx:tween(object, 1 / math.max(.1, tonumber(ctx:attr(object, "glintSpeed", 1.8)) or 1.8), { Position = UDim2.new(base.X.Scale + 1.2, base.X.Offset, base.Y.Scale, base.Y.Offset) }, Enum.EasingStyle.Linear)
+        end)
+    end,
+}]========],
+    ["Glow"] = [========[return {
+    tag = "_glow",
+    setup = function(ctx, object)
+        local stroke = object:FindFirstChildOfClass("UIStroke") or Instance.new("UIStroke")
+        stroke.Parent = object; stroke.Color = ctx:hex(ctx:attr(object, "glowColor", "#ffffff"), Color3.new(1, 1, 1))
+        local base = stroke.Thickness
+        ctx.runService.RenderStepped:Connect(function()
+            if object.Parent then stroke.Thickness = base + (1 + math.sin(time() * math.pi * 2 * (tonumber(ctx:attr(object, "glowSpeed", .8)) or .8))) * (tonumber(ctx:attr(object, "glowSize", 12)) or 12) / 8 end
+        end)
+    end,
+}]========],
+    ["Hold"] = [========[return { tag = "_hold", setup = function(ctx, object) ctx:registerHold(object) end }]========],
+    ["Jelly"] = [========[return {
+    tag = "_jelly",
+    setup = function(ctx, object)
+        local scale, base, phase = ctx:scale(object), object.Rotation, math.random() * math.pi * 2
+        ctx.runService.RenderStepped:Connect(function()
+            if object.Parent then
+                local wave = math.sin(time() * math.pi * 2 * (tonumber(ctx:attr(object, "jellySpeed", 1.2)) or 1.2) + phase)
+                object.Rotation = base + wave * (tonumber(ctx:attr(object, "jellyAmp", 3)) or 3); scale.Scale = 1 + wave * .02
+            end
+        end)
+    end,
+}]========],
+    ["Lean"] = [========[return {
+    tag = "_lean",
+    setup = function(ctx, object)
+        local base = object.Rotation
+        object.MouseEnter:Connect(function() ctx:tween(object, ctx:attr(object, "leanTime", .14), { Rotation = base + (tonumber(ctx:attr(object, "leanAngle", -8)) or -8) }) end)
+        object.MouseLeave:Connect(function() ctx:tween(object, ctx:attr(object, "leanTime", .14), { Rotation = base }) end)
+    end,
+}]========],
+    ["Magnet"] = [========[local UserInputService = game:GetService("UserInputService")
+return {
+    tag = "_magnet",
+    setup = function(ctx, button)
+        if not button:IsA("GuiButton") then return end
+        local base = button.Position
+        ctx.runService.RenderStepped:Connect(function()
+            if not button.Parent then return end
+            local mouse = UserInputService:GetMouseLocation()
+            local center = button.AbsolutePosition + button.AbsoluteSize / 2
+            local delta = mouse - center
+            local radius = tonumber(ctx:attr(button, "magnetRadius", 60)) or 60
+            if delta.Magnitude < radius then
+                local pull = tonumber(ctx:attr(button, "magnetPull", .35)) or .35
+                button.Position = base + UDim2.fromOffset(delta.X * pull, delta.Y * pull)
+            else
+                button.Position = base
+            end
+        end)
+    end,
+}]========],
+    ["Pixels"] = [========[return {
+    tag = "_pixels",
+    setup = function(ctx, object)
+        object.ClipsDescendants = true
+        task.spawn(function()
+            while object.Parent do
+                local cell = tonumber(ctx:attr(object, "pixCell", 14)) or 14
+                local pixel = Instance.new("Frame")
+                pixel.Name = "FramewispPixel"; pixel.Size = UDim2.fromOffset(cell, cell); pixel.Position = UDim2.fromScale(math.random(), math.random()); pixel.AnchorPoint = Vector2.new(.5, .5)
+                pixel.BackgroundColor3 = ctx:hex(ctx:attr(object, "pixColor", "#ffffff"), Color3.new(1, 1, 1)); pixel.BackgroundTransparency = 1; pixel.BorderSizePixel = 0; pixel.ZIndex = object.ZIndex + 10; pixel.Parent = object
+                ctx:tween(pixel, .18, { BackgroundTransparency = 1 - (tonumber(ctx:attr(object, "pixAlpha", .35)) or .35) }).Completed:Wait()
+                ctx:tween(pixel, .3, { BackgroundTransparency = 1 }).Completed:Connect(function() pixel:Destroy() end)
+                task.wait(1 / math.max(.5, tonumber(ctx:attr(object, "pixRate", 8)) or 8))
+            end
+        end)
+    end,
+}]========],
+    ["Pointer"] = [========[return {
+    tag = "_pointer",
+    setup = function(ctx, pointer)
+        pointer.Visible = false
+        local function matches(button)
+            local menu = pointer.Parent
+            return menu and not ctx:has(button, "_nopointer") and (button.Parent == menu or button:IsDescendantOf(menu))
+        end
+        ctx:onGlobal("enter", function(button)
+            if not button:IsA("GuiButton") or not matches(button) then return end
+            pointer.Visible = true
+            local nudge, side = tonumber(ctx:attr(pointer, "pointerNudge", 0)) or 0, tonumber(ctx:attr(pointer, "pointerSide", 0)) or 0
+            local target = button.Position
+            if side == 1 then target -= UDim2.fromOffset(pointer.AbsoluteSize.X + nudge, 0) elseif side == 2 then target += UDim2.fromOffset(button.AbsoluteSize.X + nudge, 0) elseif side == 3 then target -= UDim2.fromOffset(0, pointer.AbsoluteSize.Y + nudge) elseif side == 4 then target += UDim2.fromOffset(0, button.AbsoluteSize.Y + nudge) end
+            ctx:tween(pointer, 1 / math.max(1, tonumber(ctx:attr(pointer, "pointerSpeed", 5)) or 5), { Position = target }, Enum.EasingStyle.Back)
+        end)
+        ctx:onGlobal("leave", function(button) if matches(button) then task.delay(tonumber(ctx:attr(pointer, "pointerHold", .5)) or .5, function() if pointer.Parent then pointer.Visible = false end end) end end)
+        ctx:onGlobal("down", function(button) if matches(button) then local poke = tonumber(ctx:attr(pointer, "pointerPress", 10)) or 10; ctx:tween(pointer, .08, { Position = pointer.Position + UDim2.fromOffset(0, poke) }) end end)
+    end,
+}]========],
+    ["Pop"] = [========[return {
+    tag = "_pop",
+    setup = function(ctx, object)
+        ctx:on(object, "show", function()
+            local scale = ctx:scale(object)
+            scale.Scale = tonumber(ctx:attr(object, "popFrom", .8)) or .8
+            ctx:tween(scale, ctx:attr(object, "popTime", .3), { Scale = 1 }, Enum.EasingStyle.Back)
+        end)
+    end,
+}]========],
+    ["Prompt"] = [========[return {
+    tag = "_prompt",
+    setup = function(ctx, object)
+        local gui = object:FindFirstAncestorWhichIsA("LayerCollector")
+        local anchor = nil
+        pcall(function() anchor = gui.Adornee end)
+        local prompt = anchor and anchor:FindFirstChildOfClass("ProximityPrompt")
+        if not prompt then return end
+        prompt.HoldDuration = tonumber(ctx:attr(object, "promptHold", .6)) or .6; prompt.MaxActivationDistance = tonumber(ctx:attr(object, "promptDist", 10)) or 10
+        local key = tostring(ctx:attr(object, "promptKey", "E"))
+        pcall(function() prompt.KeyboardKeyCode = Enum.KeyCode[key] end)
+    end,
+}]========],
+    ["Pulse"] = [========[return {
+    tag = "_pulse",
+    setup = function(ctx, object)
+        local scale = ctx:scale(object)
+        ctx.runService.RenderStepped:Connect(function()
+            if object.Parent then
+                local amplitude = (tonumber(ctx:attr(object, "pulseAmp", 5)) or 5) / 100
+                local speed = tonumber(ctx:attr(object, "pulseSpeed", 1)) or 1
+                scale.Scale = 1 + math.max(0, math.sin(time() * math.pi * 2 * speed)) * amplitude
+            end
+        end)
+    end,
+}]========],
+    ["Rays"] = [========[return {
+    tag = "_rays",
+    setup = function(ctx, object)
+        local scale = ctx:scale(object)
+        ctx.runService.RenderStepped:Connect(function(delta)
+            if not object.Parent then return end
+            object.Rotation += (tonumber(ctx:attr(object, "raysSpeed", 25)) or 25) * delta
+            local amplitude = (tonumber(ctx:attr(object, "raysPulse", 6)) or 6) / 100
+            scale.Scale = 1 + math.max(0, math.sin(time() * math.pi * 2)) * amplitude
+        end)
+    end,
+}]========],
+    ["Resolver"] = [========[-- Resolves effects from tags or from their exported/manual attributes.
+-- Attribute-only activation intentionally ignores keys shared by multiple effects;
+-- ambiguous configurations still need an explicit FWTags entry.
+local Resolver = {}
+
+local attributes = {
+    _button = { "hoverDim", "pressDim", "pressScale", "hoverSound", "clickSound" },
+    _smooth = { "hoverScale", "pressScale", "hoverSound", "clickSound" },
+    _up = { "upDist", "upTime" },
+    _turn = { "turnAngle", "turnTime" },
+    _squish = { "squishAmp", "squishTime" },
+    _ripple = { "rippleColor", "rippleOp", "rippleTime" },
+    _magnet = { "magnetPull", "magnetRadius" },
+    _select = { "selectColor", "selectWidth", "selectPop", "selectTime" },
+    _color = { "colorPick", "colorPick2", "colorAngle", "colorIn", "colorOut" },
+    _glint = { "glintSpeed" },
+    _burst = { "burstCount", "burstTime", "burstDist", "burstAlpha", "burstSize", "burstSizeMax", "burstShrink", "burstSpin", "burstSpinSpeed", "burstColor" },
+    _pointer = { "pointerSide", "pointerNudge", "pointerTurn", "pointerIn", "pointerSpeed", "pointerBounce", "pointerPress", "pointerHold", "pointerBob", "pointerBobAmp" },
+    _card = { "cardCorner", "cardPoint", "cardX", "cardY", "cardDelay", "cardHide", "cardFlip", "cardSticky", "cardTurn" },
+    _lean = { "leanAngle", "leanTime" },
+    _pop = { "popFrom", "popTime" },
+    _fadein = { "fadeinTime", "fadeinDelay" },
+    _drop = { "dropHeight", "dropTime", "dropBounce", "dropSquash", "dropFade", "dropDelay", "dropKids", "dropStep", "dropSound" },
+    _reveal = { "revealAngle", "revealTime", "revealDir", "revealFrom" },
+    _swing = { "swingAngle", "swingCount", "swingTime", "swingFrom" },
+    _cascade = { "cascadeGap" },
+    _spin = { "spinSpeed" },
+    _rays = { "raysSpeed", "raysPulse" },
+    _pulse = { "pulseAmp", "pulseSpeed" },
+    _float = { "floatDist", "floatSpeed", "floatAngle" },
+    _jelly = { "jellyAmp", "jellySpeed" },
+    _blink = { "blinkOn", "blinkOff", "blinkFade", "blinkDelay" },
+    _shake = { "shakeAmp", "shakeTime", "shakeEvery" },
+    _wiggle = { "wiggleAngle", "wiggleEvery" },
+    _glow = { "glowSize", "glowSpeed", "glowColor" },
+    _pixels = { "pixCell", "pixRate", "pixColor", "pixAlpha" },
+    _shiny = { "shineSpeed", "shineCooldown" },
+    _gleam = { "gleamSpeed", "gleamCooldown", "gleamWidth" },
+    _stroke = { "strokeMode", "strokeAngle", "strokeRotate", "strokeDirection", "strokeSpeed", "strokeStretch", "strokePhase" },
+    _flow = { "flowMove", "flowAngle", "flowRotate", "flowDirection", "flowSpeed", "flowStretch", "flowPhase", "flowOn", "flowMode" },
+    _drift = { "driftSpeed", "driftAngle" },
+    _fall = { "fallCount", "fallTime", "fallAlpha", "fallScale", "fallScaleMax", "fallTilt", "fallSpread", "fallGap", "fallSpin", "fallSpinSpeed" },
+    _3d = { "tiltMax" },
+    _tilt = { "tiltY", "tiltX", "tiltPersp" },
+    _billboard = { "bbStuds", "bbTop", "bbDist" },
+    _surface = { "sfStuds", "sfTop", "sfDist" },
+    _prompt = { "promptKey", "promptHold", "promptDist" },
+    _hold = { "holdColor" },
+    _focus = { "focusFov", "focusBlur", "focusDim", "focusTime" },
+    _shadow = { "shadowColor", "shadowAlpha", "shadowX", "shadowY", "shadowBlur", "shadowSpread", "shadowInset" },
+    _scroll = { "scrollBar", "scrollExtL", "scrollExtR", "scrollExtT", "scrollExtB" },
+}
+
+local owners = {}
+for tag, keys in pairs(attributes) do
+    for _, key in ipairs(keys) do
+        owners[key] = owners[key] or {}
+        owners[key][tag] = true
+    end
+end
+
+local function pascal(key)
+    return string.upper(string.sub(key, 1, 1)) .. string.sub(key, 2)
+end
+
+local function compatible(ctx, object, tag)
+    if tag == "_scroll" then return object:IsA("ScrollingFrame") end
+    if tag == "_button" or tag == "_smooth" or tag == "_up" or tag == "_turn" or tag == "_squish" or tag == "_ripple" or tag == "_magnet" or tag == "_burst" then return object:IsA("GuiButton") end
+    if tag == "_glint" or tag == "_color" or tag == "_select" then return object:IsA("GuiButton") or ctx:buttonFor(object) ~= nil end
+    if tag == "_billboard" then return object:FindFirstAncestorOfClass("BillboardGui") ~= nil end
+    if tag == "_surface" then return object:FindFirstAncestorOfClass("SurfaceGui") ~= nil end
+    if tag == "_prompt" then return object:FindFirstAncestorWhichIsA("LayerCollector") ~= nil end
+    return object:IsA("GuiObject")
+end
+
+function Resolver.matches(ctx, object, effect)
+    if ctx:has(object, effect.tag) then return true end
+    if not compatible(ctx, object, effect.tag) then return false end
+    for _, key in ipairs(attributes[effect.tag] or {}) do
+        local count = 0
+        for _ in pairs(owners[key]) do count += 1 end
+        if count == 1 and (object:GetAttribute(key) ~= nil or object:GetAttribute(pascal(key)) ~= nil) then return true end
+    end
+    return false
+end
+
+Resolver.attributes = attributes
+return Resolver]========],
+    ["Reveal"] = [========[return {
+    tag = "_reveal",
+    setup = function(ctx, object)
+        ctx:on(object, "show", function()
+            local scale, baseRotation = ctx:scale(object), ctx:remember(object, "Rotation", "revealRotation") or object.Rotation
+            scale.Scale = tonumber(ctx:attr(object, "revealFrom", .55)) or .55
+            object.Rotation = baseRotation + (tonumber(ctx:attr(object, "revealAngle", 35)) or 35)
+            local seconds = tonumber(ctx:attr(object, "revealTime", .7)) or .7
+            ctx:tween(scale, seconds, { Scale = 1 }, Enum.EasingStyle.Back)
+            ctx:tween(object, seconds, { Rotation = baseRotation }, Enum.EasingStyle.Elastic)
+        end)
+    end,
+}]========],
+    ["Ripple"] = [========[return {
+    tag = "_ripple",
+    setup = function(ctx, button)
+        if not button:IsA("GuiButton") then return end
+        ctx:on(button, "down", function()
+            button.ClipsDescendants = true
+            local wave = Instance.new("Frame")
+            wave.Name = "FramewispRipple"; wave.AnchorPoint = Vector2.new(.5, .5); wave.Position = UDim2.fromScale(.5, .5); wave.Size = UDim2.fromOffset(0, 0)
+            wave.BackgroundColor3 = ctx:hex(ctx:attr(button, "rippleColor", "#ffffff"), Color3.new(1, 1, 1)); wave.BackgroundTransparency = 1 - (tonumber(ctx:attr(button, "rippleOp", .4)) or .4)
+            wave.BorderSizePixel = 0; wave.ZIndex = button.ZIndex + 20; wave.Parent = button
+            local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(1, 0); corner.Parent = wave
+            local diameter = math.sqrt(button.AbsoluteSize.X ^ 2 + button.AbsoluteSize.Y ^ 2) * 2
+            local animation = ctx:tween(wave, ctx:attr(button, "rippleTime", .45), { Size = UDim2.fromOffset(diameter, diameter), BackgroundTransparency = 1 })
+            animation.Completed:Connect(function() wave:Destroy() end)
+        end)
+    end,
+}]========],
+    ["Scroll"] = [========[return {
+    tag = "_scroll",
+    setup = function(ctx, object)
+        if not object:IsA("ScrollingFrame") then return end
+        object.ScrollBarThickness = tonumber(ctx:attr(object, "scrollBar", 6)) or 6
+        object.AutomaticCanvasSize = Enum.AutomaticSize.XY
+        object.ScrollingDirection = Enum.ScrollingDirection.XY
+    end,
+}]========],
+    ["Select"] = [========[return {
+    tag = "_select",
+    setup = function(ctx, object)
+        local button = object:IsA("GuiButton") and object or ctx:buttonFor(object)
+        if not button then return end
+        ctx:on(button, "activate", function()
+            local owner = ctx:nearest(button, "_select") or object
+            local parent = owner.Parent
+            local previous = ctx.selectedByParent[parent]
+            local selected = previous ~= owner
+            if previous and previous ~= owner then previous:SetAttribute("FWSelected", false) end
+            ctx.selectedByParent[parent] = selected and owner or nil
+            owner:SetAttribute("FWSelected", selected)
+            if parent then parent:SetAttribute("FWSelected", selected and button.Name or "") end
+            local stroke = owner:FindFirstChildOfClass("UIStroke") or Instance.new("UIStroke")
+            stroke.Parent = owner; stroke.Color = ctx:hex(ctx:attr(owner, "selectColor", "#4ade80"), Color3.fromRGB(74, 222, 128)); stroke.Thickness = tonumber(ctx:attr(owner, "selectWidth", 3)) or 3
+            ctx:tween(stroke, ctx:attr(owner, "selectTime", .18), { Transparency = selected and 0 or 1 })
+            local scale = ctx:scale(owner)
+            if selected then ctx:tween(scale, ctx:attr(owner, "selectTime", .18), { Scale = tonumber(ctx:attr(owner, "selectPop", 1.06)) or 1.06 }, Enum.EasingStyle.Back)
+            else ctx:tween(scale, ctx:attr(owner, "selectTime", .18), { Scale = 1 }) end
+        end)
+    end,
+}]========],
+    ["Shadow"] = [========[return {
+    tag = "_shadow",
+    setup = function(ctx, object)
+        if not object.Parent or not object.Parent:IsA("GuiObject") then return end
+        local shadow = object:Clone()
+        for _, child in ipairs(shadow:GetDescendants()) do if child:IsA("LuaSourceContainer") then child:Destroy() end end
+        shadow.Name = "FramewispShadow"; shadow:SetAttribute("FWTags", "[]"); shadow.Active = false
+        shadow.Position = object.Position + UDim2.fromOffset(tonumber(ctx:attr(object, "shadowX", 0)) or 0, tonumber(ctx:attr(object, "shadowY", 8)) or 8)
+        local spread = tonumber(ctx:attr(object, "shadowSpread", 0)) or 0
+        shadow.Size = object.Size + UDim2.fromOffset(spread * 2, spread * 2); shadow.ZIndex = math.max(0, object.ZIndex - 1)
+        ctx:paint(shadow, ctx:hex(ctx:attr(object, "shadowColor", "#000000"), Color3.new(0, 0, 0))); ctx:setAlpha(shadow, 1 - (tonumber(ctx:attr(object, "shadowAlpha", .35)) or .35))
+        shadow.Parent = object.Parent
+    end,
+}]========],
+    ["Shake"] = [========[return {
+    tag = "_shake",
+    setup = function(ctx, object)
+        task.spawn(function()
+            local base = object.Position
+            while object.Parent do
+                local duration, amplitude = tonumber(ctx:attr(object, "shakeTime", .5)) or .5, tonumber(ctx:attr(object, "shakeAmp", 6)) or 6
+                local started = time()
+                while object.Parent and time() - started < duration do
+                    local decay = 1 - (time() - started) / duration
+                    object.Position = base + UDim2.fromOffset((math.random() * 2 - 1) * amplitude * decay, (math.random() * 2 - 1) * amplitude * decay)
+                    ctx.runService.RenderStepped:Wait()
+                end
+                if object.Parent then object.Position = base end
+                task.wait(math.max(0, (tonumber(ctx:attr(object, "shakeEvery", 3)) or 3) - duration))
+            end
+        end)
+    end,
+}]========],
+    ["Shared"] = [========[-- Shared runtime services for Framewisp effect modules.
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local Lighting = game:GetService("Lighting")
+local HttpService = game:GetService("HttpService")
+local GuiService = game:GetService("GuiService")
+
+local Shared = {}
+local Context = {}
+Context.__index = Context
+
+local function pascal(key)
+    return string.upper(string.sub(key, 1, 1)) .. string.sub(key, 2)
+end
+
+function Shared.create(root)
+    local self = setmetatable({}, Context)
+    self.root = root
+    self.player = Players.LocalPlayer
+    self.runService = RunService
+    self.original = setmetatable({}, { __mode = "k" })
+    self.hooks = setmetatable({}, { __mode = "k" })
+    self.globalHooks = {}
+    self.selectedByParent = setmetatable({}, { __mode = "k" })
+    self.focusPanels = setmetatable({}, { __mode = "k" })
+    self.bindingLabels = {}
+    self.holds = {}
+    self.wired = setmetatable({}, { __mode = "k" })
+    self.promptWired = setmetatable({}, { __mode = "k" })
+    self.holdsByPrompt = setmetatable({}, { __mode = "k" })
+    self.started = false
+    self.panels = {}
+    self.baseFov = workspace.CurrentCamera and workspace.CurrentCamera.FieldOfView or 70
+    for _, object in ipairs(root:GetDescendants()) do
+        if object:IsA("GuiObject") and self:has(object, "_panel") then self.panels[object.Name] = object end
+    end
+    return self
+end
+
+function Context:objects()
+    local result = {}
+    for _, object in ipairs(self.root:GetDescendants()) do
+        if object:IsA("GuiObject") then table.insert(result, object) end
+    end
+    return result
+end
+
+function Context:tags(object)
+    local ok, value = pcall(function() return HttpService:JSONDecode(object:GetAttribute("FWTags") or "[]") end)
+    return ok and type(value) == "table" and value or {}
+end
+
+function Context:has(object, tag)
+    for _, value in ipairs(self:tags(object)) do if value == tag then return true end end
+    return false
+end
+
+function Context:attr(object, key, fallback)
+    local manual = object:GetAttribute(pascal(key))
+    if manual ~= nil then return manual end
+    local exported = object:GetAttribute(key)
+    if exported ~= nil then return exported end
+    return fallback
+end
+
+function Context:tween(object, seconds, properties, style, direction)
+    local info = TweenInfo.new(math.max(0, tonumber(seconds) or 0), style or Enum.EasingStyle.Quad, direction or Enum.EasingDirection.Out)
+    local animation = TweenService:Create(object, info, properties)
+    animation:Play()
+    return animation
+end
+
+function Context:scale(object)
+    local value = object:FindFirstChild("FramewispScale")
+    if value and value:IsA("UIScale") then return value end
+    value = Instance.new("UIScale")
+    value.Name = "FramewispScale"
+    value.Parent = object
+    return value
+end
+
+function Context:hex(value, fallback)
+    if typeof(value) == "Color3" then return value end
+    if typeof(value) ~= "string" then return fallback end
+    local hex = string.gsub(value, "#", "")
+    if #hex ~= 6 then return fallback end
+    local number = tonumber(hex, 16)
+    if not number then return fallback end
+    return Color3.fromRGB(math.floor(number / 65536) % 256, math.floor(number / 256) % 256, number % 256)
+end
+
+function Context:remember(object, property, key)
+    local bucket = self.original[object]
+    if not bucket then bucket = {}; self.original[object] = bucket end
+    key = key or property
+    if bucket[key] == nil then
+        local ok, value = pcall(function() return object[property] end)
+        if ok then bucket[key] = value end
+    end
+    return bucket[key]
+end
+
+function Context:rememberValue(object, key, value)
+    local bucket = self.original[object]
+    if not bucket then bucket = {}; self.original[object] = bucket end
+    if bucket[key] == nil then bucket[key] = value end
+    return bucket[key]
+end
+
+function Context:setAlpha(object, alpha)
+    local targets = { object }
+    for _, descendant in ipairs(object:GetDescendants()) do table.insert(targets, descendant) end
+    for _, target in ipairs(targets) do
+        if target:IsA("CanvasGroup") then
+            local base = self:remember(target, "GroupTransparency") or 0
+            target.GroupTransparency = base + (1 - base) * alpha
+        elseif target:IsA("GuiObject") then
+            local base = self:remember(target, "BackgroundTransparency") or 0
+            target.BackgroundTransparency = base + (1 - base) * alpha
+            if target:IsA("ImageLabel") or target:IsA("ImageButton") then
+                local imageBase = self:remember(target, "ImageTransparency") or 0
+                target.ImageTransparency = imageBase + (1 - imageBase) * alpha
+            end
+            if target:IsA("TextLabel") or target:IsA("TextButton") or target:IsA("TextBox") then
+                local textBase = self:remember(target, "TextTransparency") or 0
+                target.TextTransparency = textBase + (1 - textBase) * alpha
+                local strokeBase = self:remember(target, "TextStrokeTransparency") or 1
+                target.TextStrokeTransparency = strokeBase + (1 - strokeBase) * alpha
+            end
+        elseif target:IsA("UIStroke") then
+            local base = self:remember(target, "Transparency") or 0
+            target.Transparency = base + (1 - base) * alpha
+        end
+    end
+end
+
+function Context:tweenAlpha(object, seconds, alpha)
+    if object:IsA("CanvasGroup") then
+        local base = self:remember(object, "GroupTransparency") or 0
+        return self:tween(object, seconds, { GroupTransparency = base + (1 - base) * alpha })
+    end
+    local proxy = Instance.new("NumberValue")
+    proxy.Value = alpha == 0 and 1 or 0
+    proxy.Changed:Connect(function(value) if object.Parent then self:setAlpha(object, value) end end)
+    local animation = self:tween(proxy, seconds, { Value = alpha })
+    animation.Completed:Connect(function() proxy:Destroy() end)
+    return animation
+end
+
+function Context:color(object)
+    if object:IsA("ImageLabel") or object:IsA("ImageButton") then return object.ImageColor3 end
+    if object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox") then return object.TextColor3 end
+    return object.BackgroundColor3
+end
+
+function Context:paint(object, color)
+    if object:IsA("ImageLabel") or object:IsA("ImageButton") then object.ImageColor3 = color
+    elseif object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox") then object.TextColor3 = color
+    else object.BackgroundColor3 = color end
+end
+
+function Context:playSound(object, key)
+    local value = tostring(self:attr(object, key, ""))
+    if value == "" or value == "0" then return end
+    local sound = Instance.new("Sound")
+    sound.Name = "FramewispSound"
+    sound.SoundId = string.find(value, "rbxassetid://", 1, true) and value or "rbxassetid://" .. value
+    sound.Parent = object
+    sound.Ended:Connect(function() sound:Destroy() end)
+    sound:Play()
+end
+
+function Context:on(object, event, callback)
+    local bucket = self.hooks[object]
+    if not bucket then bucket = {}; self.hooks[object] = bucket end
+    bucket[event] = bucket[event] or {}
+    table.insert(bucket[event], callback)
+end
+
+function Context:onGlobal(event, callback)
+    self.globalHooks[event] = self.globalHooks[event] or {}
+    table.insert(self.globalHooks[event], callback)
+end
+
+function Context:emit(object, event, ...)
+    local bucket = self.hooks[object]
+    for _, callback in ipairs(bucket and bucket[event] or {}) do
+        local ok, message = pcall(callback, ...)
+        if not ok then warn("Framewisp hook failed:", event, message) end
+    end
+    for _, callback in ipairs(self.globalHooks[event] or {}) do
+        local ok, message = pcall(callback, object, ...)
+        if not ok then warn("Framewisp global hook failed:", event, message) end
+    end
+end
+
+function Context:buttonFor(object)
+    local current = object
+    while current and current ~= self.root do
+        if current:IsA("GuiButton") then return current end
+        current = current.Parent
+    end
+    return nil
+end
+
+function Context:nearest(object, tag)
+    local current = object.Parent
+    while current and current ~= self.root do
+        if self:has(current, tag) then return current end
+        current = current.Parent
+    end
+    return nil
+end
+
+function Context:enabled(button)
+    if not button.Active then return false end
+    local ok, value = pcall(function() return button.Interactable end)
+    return not ok or value ~= false
+end
+
+function Context:variant(button, state)
+    for _, child in ipairs(button:GetChildren()) do
+        if child:IsA("GuiObject") then
+            if self:has(child, "_default") then child.Visible = state == "default"
+            elseif self:has(child, "_hover") then child.Visible = state == "hover"
+            elseif self:has(child, "_clicked") then child.Visible = state == "clicked"
+            elseif self:has(child, "_disabled") then child.Visible = state == "disabled"
+            elseif self:has(child, "_active") then child.Visible = state == "active" end
+        end
+    end
+end
+
+function Context:registerFocus(object)
+    self.focusPanels[object] = false
+end
+
+function Context:updateFocus()
+    local count, blurSize, dim, fovDelta, seconds = 0, 0, 0, 0, .35
+    for panel, active in pairs(self.focusPanels) do
+        if active and panel.Parent and panel.Visible then
+            count += 1
+            blurSize = math.max(blurSize, tonumber(self:attr(panel, "focusBlur", 18)) or 18)
+            dim = math.max(dim, tonumber(self:attr(panel, "focusDim", 0)) or 0)
+            fovDelta = math.min(fovDelta, tonumber(self:attr(panel, "focusFov", -8)) or -8)
+            seconds = math.max(seconds, tonumber(self:attr(panel, "focusTime", .35)) or .35)
+        end
+    end
+    local blur = Lighting:FindFirstChild("FramewispFocusBlur") or Instance.new("BlurEffect")
+    blur.Name = "FramewispFocusBlur"; blur.Parent = Lighting
+    local correction = Lighting:FindFirstChild("FramewispFocusDim") or Instance.new("ColorCorrectionEffect")
+    correction.Name = "FramewispFocusDim"; correction.Parent = Lighting
+    self:tween(blur, seconds, { Size = count > 0 and blurSize or 0 })
+    self:tween(correction, seconds, { Brightness = count > 0 and -dim or 0 })
+    local camera = workspace.CurrentCamera
+    if camera then self:tween(camera, seconds, { FieldOfView = count > 0 and self.baseFov + fovDelta or self.baseFov }) end
+end
+
+function Context:show(panel, on)
+    if not panel then return end
+    panel.Visible = on
+    if self.focusPanels[panel] ~= nil then self.focusPanels[panel] = on; self:updateFocus() end
+    if on then
+        self:emit(panel, "show")
+        for _, child in ipairs(panel:GetDescendants()) do if child:IsA("GuiObject") then self:emit(child, "show") end end
+    end
+end
+
+function Context:resolveBinding(binding)
+    if binding == "PlayerName" or binding == "Player" then return self.player.Name end
+    if binding == "DisplayName" then return self.player.DisplayName end
+    local attribute = string.match(binding, "^attr:(.+)$")
+    if attribute then return self.player:GetAttribute(attribute) end
+    local current = self.player
+    local path = string.find(binding, "%.") and binding or "leaderstats." .. binding
+    for part in string.gmatch(path, "[^%.]+") do current = current and current:FindFirstChild(part) or nil end
+    if current and current:IsA("ValueBase") then return current.Value end
+    return current and current.Name or nil
+end
+
+function Context:bind(label)
+    if label:GetAttribute("FWTextTemplate") == nil then label:SetAttribute("FWTextTemplate", label.Text) end
+    table.insert(self.bindingLabels, label)
+end
+
+function Context:refreshBinding(label)
+    local direct = label:GetAttribute("FWParam_bind") or label:GetAttribute("FWParam_binding")
+    local template = label:GetAttribute("FWTextTemplate") or label.Text
+    if direct then label.Text = tostring(self:resolveBinding(tostring(direct)) or ""); return end
+    label.Text = string.gsub(template, "{([^{}]+)}", function(binding)
+        local value = self:resolveBinding(binding)
+        return value == nil and "" or tostring(value)
+    end)
+end
+
+function Context:registerHold(object)
+    table.insert(self.holds, object)
+    if self.started then self:setupPrompt() end
+end
+
+function Context:activateTab(button)
+    local target = button:GetAttribute("FWParam_tab")
+    if not target then return end
+    local group = self:nearest(button, "_tabgroup") or self.root
+    for _, candidate in ipairs(group:GetDescendants()) do
+        if candidate:IsA("GuiButton") then
+            local candidateTarget = candidate:GetAttribute("FWParam_tab")
+            if candidateTarget then
+                local active = candidate == button
+                self:variant(candidate, active and "active" or "default")
+                if self.panels[candidateTarget] then self:show(self.panels[candidateTarget], active) end
+            end
+        end
+    end
+end
+
+function Context:wireAction(button)
+    local closeName = button:GetAttribute("FWParam_close")
+    if self:has(button, "_close") then self:show(closeName and self.panels[closeName] or self:nearest(button, "_panel") or self.root, false) end
+    local openName = button:GetAttribute("FWParam_open")
+    if openName then self:show(self.panels[openName], true) end
+    local toggleName = button:GetAttribute("FWParam_toggle")
+    if toggleName and self.panels[toggleName] then self:show(self.panels[toggleName], not self.panels[toggleName].Visible) end
+    if button:GetAttribute("FWParam_tab") then self:activateTab(button) end
+end
+
+function Context:setupPrompt()
+    if #self.holds == 0 then return end
+    for _, object in ipairs(self.holds) do
+        local gui = object:FindFirstAncestorWhichIsA("LayerCollector")
+        local anchor = nil
+        if gui then pcall(function() anchor = gui.Adornee end) end
+        local prompt = anchor and anchor:FindFirstChildOfClass("ProximityPrompt")
+        if prompt then
+            self.holdsByPrompt[prompt] = self.holdsByPrompt[prompt] or {}
+            if not table.find(self.holdsByPrompt[prompt], object) then table.insert(self.holdsByPrompt[prompt], object) end
+            if not self.promptWired[prompt] then
+                self.promptWired[prompt] = true
+                local function amount(value)
+                    for _, hold in ipairs(self.holdsByPrompt[prompt] or {}) do
+                        local gradient = hold:FindFirstChildOfClass("UIGradient") or Instance.new("UIGradient")
+                        gradient.Parent = hold
+                        local color = self:hex(self:attr(hold, "holdColor", "#22c55e"), Color3.fromRGB(34, 197, 94))
+                        gradient.Color = ColorSequence.new(color, color)
+                        local edge = math.clamp(value, 0, 1)
+                        gradient.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(edge, 0), NumberSequenceKeypoint.new(math.min(1, edge + .001), 1), NumberSequenceKeypoint.new(1, 1) })
+                    end
+                end
+                prompt.PromptShown:Connect(function() if gui then gui.Enabled = true end end)
+                prompt.PromptHidden:Connect(function() if gui then gui.Enabled = false end; amount(0) end)
+                prompt.PromptButtonHoldBegan:Connect(function()
+                    local started = time()
+                    task.spawn(function()
+                        while prompt.Parent and time() - started <= prompt.HoldDuration do
+                            amount(prompt.HoldDuration <= 0 and 1 or (time() - started) / prompt.HoldDuration)
+                            RunService.RenderStepped:Wait()
+                        end
+                    end)
+                end)
+                prompt.PromptButtonHoldEnded:Connect(function() amount(0) end)
+            end
+        end
+    end
+end
+
+function Context:wireObject(object)
+    if self.wired[object] then return end
+    self.wired[object] = true
+    if self:has(object, "_panel") then self.panels[object.Name] = object end
+    if object:IsA("TextLabel") and (string.find(object.Text, "{", 1, true) or object:GetAttribute("FWParam_bind") or object:GetAttribute("FWParam_binding")) then self:bind(object); self:refreshBinding(object) end
+    if object:IsA("GuiButton") then
+        local button = object
+        self:variant(button, self:enabled(button) and "default" or "disabled")
+        button.MouseEnter:Connect(function() if self:enabled(button) then self:variant(button, "hover"); self:emit(button, "enter") else self:variant(button, "disabled") end end)
+        button.MouseLeave:Connect(function() self:variant(button, self:enabled(button) and "default" or "disabled"); self:emit(button, "leave") end)
+        button.MouseButton1Down:Connect(function() if self:enabled(button) then self:variant(button, "clicked"); self:emit(button, "down") end end)
+        button.MouseButton1Up:Connect(function() if self:enabled(button) then self:variant(button, "hover"); self:emit(button, "up") end end)
+        button.Activated:Connect(function() if self:enabled(button) then self:emit(button, "activate"); self:wireAction(button) end end)
+        button:GetPropertyChangedSignal("Active"):Connect(function() self:variant(button, self:enabled(button) and "default" or "disabled") end)
+    end
+end
+
+function Context:finish()
+    for _, object in ipairs(self:objects()) do self:wireObject(object) end
+    for _, object in ipairs(self:objects()) do if object.Visible then self:emit(object, "show") end end
+    for _, group in ipairs(self:objects()) do
+        if self:has(group, "_tabgroup") then
+            for _, candidate in ipairs(group:GetDescendants()) do if candidate:IsA("GuiButton") and candidate:GetAttribute("FWParam_tab") then self:activateTab(candidate); break end end
+        end
+    end
+    self:setupPrompt()
+    self.started = true
+    task.spawn(function()
+        while self.root.Parent do
+            for index = #self.bindingLabels, 1, -1 do
+                local label = self.bindingLabels[index]
+                if label.Parent then self:refreshBinding(label) else table.remove(self.bindingLabels, index) end
+            end
+            task.wait(.25)
+        end
+    end)
+    GuiService.AutoSelectGuiEnabled = true
+end
+
+return Shared]========],
+    ["Shiny"] = [========[return {
+    tag = "_shiny",
+    setup = function(ctx, object)
+        local parent = object.Parent
+        if not parent or not parent:IsA("GuiObject") then return end
+        parent.ClipsDescendants = true; object.Visible = true
+        local base = object.Position
+        local function sweep()
+            if not object.Parent then return end
+            object.Position = UDim2.new(base.X.Scale - 1.2, base.X.Offset, base.Y.Scale, base.Y.Offset)
+            local animation = ctx:tween(object, 1 / math.max(.1, tonumber(ctx:attr(object, "shineSpeed", 1.2)) or 1.2), { Position = UDim2.new(base.X.Scale + 1.2, base.X.Offset, base.Y.Scale, base.Y.Offset) }, Enum.EasingStyle.Linear)
+            animation.Completed:Connect(function() task.delay(tonumber(ctx:attr(object, "shineCooldown", 2)) or 2, sweep) end)
+        end
+        sweep()
+    end,
+}]========],
+    ["Smooth"] = [========[return {
+    tag = "_smooth",
+    setup = function(ctx, button)
+        if not button:IsA("GuiButton") then return end
+        local scale = ctx:scale(button)
+        ctx:on(button, "enter", function() ctx:tween(scale, .12, { Scale = tonumber(ctx:attr(button, "hoverScale", 1.08)) or 1.08 }); ctx:playSound(button, "hoverSound") end)
+        ctx:on(button, "leave", function() ctx:tween(scale, .18, { Scale = 1 }) end)
+        ctx:on(button, "down", function() ctx:tween(scale, .06, { Scale = tonumber(ctx:attr(button, "pressScale", .9)) or .9 }) end)
+        ctx:on(button, "up", function() ctx:tween(scale, .14, { Scale = tonumber(ctx:attr(button, "hoverScale", 1.08)) or 1.08 }, Enum.EasingStyle.Back) end)
+        ctx:on(button, "activate", function() ctx:playSound(button, "clickSound") end)
+    end,
+}]========],
+    ["Spin"] = [========[return {
+    tag = "_spin",
+    setup = function(ctx, object)
+        ctx.runService.RenderStepped:Connect(function(delta) if object.Parent then object.Rotation += (tonumber(ctx:attr(object, "spinSpeed", 120)) or 120) * delta end end)
+    end,
+}]========],
+    ["Squish"] = [========[return {
+    tag = "_squish",
+    setup = function(ctx, button)
+        if not button:IsA("GuiButton") then return end
+        local base = button.Size
+        ctx:on(button, "down", function()
+            local amount = (tonumber(ctx:attr(button, "squishAmp", 10)) or 10) / 100
+            ctx:tween(button, .08, { Size = UDim2.new(base.X.Scale * (1 + amount), base.X.Offset, base.Y.Scale * (1 - amount), base.Y.Offset) })
+        end)
+        ctx:on(button, "up", function() ctx:tween(button, ctx:attr(button, "squishTime", .18), { Size = base }, Enum.EasingStyle.Back) end)
+        ctx:on(button, "leave", function() ctx:tween(button, ctx:attr(button, "squishTime", .18), { Size = base }, Enum.EasingStyle.Back) end)
+    end,
+}]========],
+    ["Stroke"] = [========[return {
+    tag = "_stroke",
+    setup = function(ctx, object)
+        local gradients = {}
+        for _, child in ipairs(object:GetDescendants()) do if child:IsA("UIGradient") and child.Parent:IsA("UIStroke") then table.insert(gradients, child) end end
+        local stroke = object:FindFirstChildOfClass("UIStroke")
+        if stroke and #gradients == 0 then local gradient = Instance.new("UIGradient"); gradient.Parent = stroke; table.insert(gradients, gradient) end
+        for _, gradient in ipairs(gradients) do gradient.Rotation = tonumber(ctx:attr(object, "strokeAngle", 0)) or 0; gradient.Offset = Vector2.new(tonumber(ctx:attr(object, "strokePhase", 0)) or 0, 0) end
+        ctx.runService.RenderStepped:Connect(function(delta)
+            if not object.Parent then return end
+            for _, gradient in ipairs(gradients) do
+                if tonumber(ctx:attr(object, "strokeMode", 0)) == 0 then gradient.Rotation += (tonumber(ctx:attr(object, "strokeRotate", 45)) or 45) * delta
+                else
+                    local angle, speed = math.rad(tonumber(ctx:attr(object, "strokeDirection", 0)) or 0), tonumber(ctx:attr(object, "strokeSpeed", .35)) or .35
+                    gradient.Offset += Vector2.new(math.cos(angle), math.sin(angle)) * speed * delta
+                    if math.abs(gradient.Offset.X) > 1 or math.abs(gradient.Offset.Y) > 1 then gradient.Offset = Vector2.new(gradient.Offset.X % 1, gradient.Offset.Y % 1) end
+                end
+            end
+        end)
+    end,
+}]========],
+    ["Surface"] = [========[return {
+    tag = "_surface",
+    setup = function(ctx, object)
+        local gui = object:FindFirstAncestorOfClass("SurfaceGui")
+        if not gui then return end
+        gui.AlwaysOnTop = ctx:attr(object, "sfTop", false)
+        pcall(function() gui.MaxDistance = tonumber(ctx:attr(object, "sfDist", 0)) or 0 end)
+        pcall(function() gui.PixelsPerStud = math.max(1, object.AbsoluteSize.X / math.max(1, tonumber(ctx:attr(object, "sfStuds", 8)) or 8)) end)
+    end,
+}]========],
+    ["Swing"] = [========[return {
+    tag = "_swing",
+    setup = function(ctx, object)
+        ctx:on(object, "show", function()
+            local scale, base = ctx:scale(object), ctx:remember(object, "Rotation", "swingRotation") or object.Rotation
+            local angle, seconds = tonumber(ctx:attr(object, "swingAngle", 20)) or 20, tonumber(ctx:attr(object, "swingTime", 1.2)) or 1.2
+            scale.Scale = tonumber(ctx:attr(object, "swingFrom", .5)) or .5; object.Rotation = base + angle
+            ctx:tween(scale, seconds * .4, { Scale = 1 }, Enum.EasingStyle.Back)
+            ctx:tween(object, seconds, { Rotation = base }, Enum.EasingStyle.Elastic)
+        end)
+    end,
+}]========],
+    ["ThreeD"] = [========[local UserInputService = game:GetService("UserInputService")
+return {
+    tag = "_3d",
+    setup = function(ctx, object)
+        local base = object.Rotation
+        ctx.runService.RenderStepped:Connect(function()
+            if not object.Parent then return end
+            local mouse, center = UserInputService:GetMouseLocation(), object.AbsolutePosition + object.AbsoluteSize / 2
+            local dynamic = math.clamp((mouse.X - center.X) / math.max(1, object.AbsoluteSize.X), -.5, .5) * (tonumber(ctx:attr(object, "tiltMax", 8)) or 8)
+            object.Rotation = base + (tonumber(ctx:attr(object, "tiltY", 0)) or 0) * .12 + (tonumber(ctx:attr(object, "tiltX", 0)) or 0) * .06 + dynamic
+        end)
+    end,
+}]========],
+    ["Tilt"] = [========[return {
+    tag = "_tilt",
+    setup = function(ctx, object)
+        if ctx:has(object, "_3d") then return end
+        local base = object.Rotation
+        object.Rotation = base + (tonumber(ctx:attr(object, "tiltY", -14)) or -14) * .12 + (tonumber(ctx:attr(object, "tiltX", 6)) or 6) * .06
+    end,
+}]========],
+    ["Turn"] = [========[return {
+    tag = "_turn",
+    setup = function(ctx, button)
+        if not button:IsA("GuiButton") then return end
+        local base = button.Rotation
+        ctx:on(button, "enter", function() ctx:tween(button, ctx:attr(button, "turnTime", .14), { Rotation = base + (tonumber(ctx:attr(button, "turnAngle", -5)) or -5) }) end)
+        ctx:on(button, "leave", function() ctx:tween(button, ctx:attr(button, "turnTime", .14), { Rotation = base }) end)
+    end,
+}]========],
+    ["Up"] = [========[return {
+    tag = "_up",
+    setup = function(ctx, button)
+        if not button:IsA("GuiButton") then return end
+        local base = button.Position
+        ctx:on(button, "enter", function() ctx:tween(button, ctx:attr(button, "upTime", .12), { Position = base - UDim2.fromOffset(0, tonumber(ctx:attr(button, "upDist", 6)) or 6) }) end)
+        ctx:on(button, "leave", function() ctx:tween(button, ctx:attr(button, "upTime", .12), { Position = base }) end)
+    end,
+}]========],
+    ["Wiggle"] = [========[return {
+    tag = "_wiggle",
+    setup = function(ctx, object)
+        task.spawn(function()
+            local base = object.Rotation
+            while object.Parent do
+                local angle, started = tonumber(ctx:attr(object, "wiggleAngle", 12)) or 12, time()
+                while object.Parent and time() - started < .65 do
+                    local elapsed = time() - started
+                    object.Rotation = base + math.sin(elapsed * math.pi * 8) * angle * (1 - elapsed / .65)
+                    ctx.runService.RenderStepped:Wait()
+                end
+                if object.Parent then object.Rotation = base end
+                task.wait(math.max(0, (tonumber(ctx:attr(object, "wiggleEvery", 4)) or 4) - .65))
+            end
+        end)
+    end,
+}]========],
+}
+
+local function ensureRuntime(container: Instance)
+    local modules = ReplicatedStorage:FindFirstChild("FramewispEffects")
+    if modules and not modules:IsA("Folder") then modules:Destroy(); modules = nil end
+    if not modules then modules = new("Folder", { Name = "FramewispEffects" }, ReplicatedStorage) end
+    modules:SetAttribute("FWGenerated", true)
+    local expected = {}
+    for name, source in pairs(runtimeModules) do
+        expected[name] = true
+        local module = modules:FindFirstChild(name)
+        if module and not module:IsA("ModuleScript") then module:Destroy(); module = nil end
+        if not module then module = new("ModuleScript", { Name = name }, modules) end
+        module:SetAttribute("FWGenerated", true)
+        pcall(function() (module :: ModuleScript).Source = source end)
+    end
+    for _, child in ipairs(modules:GetChildren()) do
+        if child:IsA("ModuleScript") and child:GetAttribute("FWGenerated") and not expected[child.Name] then child:Destroy() end
+    end
+    local scripts = StarterPlayer:FindFirstChildOfClass("StarterPlayerScripts")
+    if not scripts then scripts = new("StarterPlayerScripts", { Name = "StarterPlayerScripts" }, StarterPlayer) end
+    local runtime = scripts:FindFirstChild("FramewispRuntime")
+    if runtime and not runtime:IsA("LocalScript") then runtime:Destroy(); runtime = nil end
+    if not runtime then runtime = new("LocalScript", { Name = "FramewispRuntime" }, scripts) end
+    runtime:SetAttribute("FWGenerated", true)
+    pcall(function() (runtime :: LocalScript).Source = runtimeSource end)
+
+    local oldRuntime = container:FindFirstChild("FramewispRuntime")
+    if oldRuntime and oldRuntime:GetAttribute("FWGenerated") then oldRuntime:Destroy() end
+    local oldModules = container:FindFirstChild("FramewispEffects")
+    if oldModules and oldModules:GetAttribute("FWGenerated") then oldModules:Destroy() end
+end
+
+local function rootHost(document: any): (Instance, GuiObject)
+    local name = cleanInstanceName(document.root.cleanName or document.documentName or "Framewisp")
+    local old = StarterGui:FindFirstChild(name)
+    local rootTags = document.root.tags or {}
+    local function rootHas(tag: string): boolean for _, value in ipairs(rootTags) do if value == tag then return true end end return false end
+    if rootHas("_billboard") or rootHas("_surface") or rootHas("_prompt") then
+        local anchorName = name .. "_Anchor"
+        local anchor = workspace:FindFirstChild(anchorName) :: Part?
+        if not anchor then
+            anchor = new("Part", { Name = anchorName, Anchored = true, CanCollide = false, Size = Vector3.new(8, math.max(1, 8 * document.root.height / math.max(document.root.width, 1)), .2), CFrame = workspace.CurrentCamera and workspace.CurrentCamera.CFrame * CFrame.new(0, 0, -12) or CFrame.new(0, 5, 0) }, workspace) :: Part
+        end
+        if rootHas("_prompt") then
+            local prompt = anchor:FindFirstChildOfClass("ProximityPrompt") or new("ProximityPrompt", nil, anchor)
+            prompt.KeyboardKeyCode = Enum.KeyCode.E
+            prompt.HoldDuration = tonumber(document.root.fx.promptHold) or .6
+            prompt.MaxActivationDistance = tonumber(document.root.fx.promptDist) or 10
+            prompt.RequiresLineOfSight = false
+            prompt.Style = Enum.ProximityPromptStyle.Custom
+        end
+        local guiClass = rootHas("_surface") and "SurfaceGui" or "BillboardGui"
+        if old and old.ClassName ~= guiClass then old:Destroy(); old = nil end
+        local gui = old or new(guiClass, { Name = name, ResetOnSpawn = false }, StarterGui)
+        local worldGui: any = gui
+        worldGui.Adornee = anchor
+        worldGui.AlwaysOnTop = rootHas("_billboard") and document.root.fx.bbTop ~= false or document.root.fx.sfTop == true
+        if gui:IsA("BillboardGui") then gui.Size = UDim2.fromScale(tonumber(document.root.fx.bbStuds) or 8, (tonumber(document.root.fx.bbStuds) or 8) * document.root.height / math.max(document.root.width, 1)) end
+        local frame = gui:FindFirstChild("Root") :: Frame? or new("Frame", { Name = "Root", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1) }, gui) :: Frame
+        return gui, frame
+    end
+    if old and not old:IsA("ScreenGui") then old:Destroy(); old = nil end
+    local screen = old :: ScreenGui? or new("ScreenGui", { Name = name, ResetOnSpawn = false, IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling }, StarterGui) :: ScreenGui
+    local frame = screen:FindFirstChild("Root") :: Frame? or new("Frame", { Name = "Root", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1) }, screen) :: Frame
+    return screen, frame
+end
+
+local function importDocument(document: any)
+    currentDocument = document
+    ChangeHistoryService:SetWaypoint("Before Framewisp import")
+    local container, frame = rootHost(document)
+    importedRoot = container
+    generatedById = {}
+    local rootNode = document.root
+    frame.Name = cleanInstanceName(rootNode.cleanName or "Root")
+    setAttributes(frame, rootNode)
+    frame:SetAttribute("FramewispDocument", document.documentName)
+    frame.Visible = rootNode.visible ~= false
+    applyFill(frame, rootNode.fills or {})
+    local isWorld = container:IsA("BillboardGui") or container:IsA("SurfaceGui")
+    local aspect = frame:FindFirstChild("FramewispRootAspect")
+    if not isWorld and placementMode == "exact" and document.artboard and tonumber(document.artboard.width) and tonumber(document.artboard.height) then
+        if aspect then aspect:Destroy() end
+        frame.AnchorPoint = Vector2.zero
+        frame.Position = UDim2.fromScale((tonumber(document.artboard.x) or 0) / math.max(tonumber(document.artboard.width) or 1, 1), (tonumber(document.artboard.y) or 0) / math.max(tonumber(document.artboard.height) or 1, 1))
+        frame.Size = UDim2.fromScale((tonumber(rootNode.width) or 1) / math.max(tonumber(document.artboard.width) or 1, 1), (tonumber(rootNode.height) or 1) / math.max(tonumber(document.artboard.height) or 1, 1))
+    else
+        frame.AnchorPoint = Vector2.new(.5, .5)
+        frame.Position = UDim2.fromScale(.5, .5)
+        frame.Size = UDim2.fromScale(1, 1)
+        if not isWorld then
+            aspect = aspect or new("UIAspectRatioConstraint", { Name = "FramewispRootAspect" }, frame)
+            aspect.AspectRatio = (tonumber(rootNode.width) or 1) / math.max(tonumber(rootNode.height) or 1, 1)
+            aspect.AspectType = Enum.AspectType.FitWithinMaxSize
+        end
+    end
+    local liveIds: {[string]: boolean} = {}
+    for _, childNode in ipairs(rootNode.children or {}) do
+        liveIds[childNode.id] = true
+        reconcileNode(frame, childNode, tonumber(rootNode.width) or 1, tonumber(rootNode.height) or 1)
+    end
+    for _, child in ipairs(frame:GetChildren()) do
+        local id = child:GetAttribute("FWSourceId")
+        if id and not liveIds[id] and not child:IsA("LuaSourceContainer") then child:Destroy() end
+    end
+    ensureRuntime(container)
+    ChangeHistoryService:SetWaypoint("Import Framewisp UI")
+    setStatus(`Imported ${container.Name}${document.warnings and #document.warnings > 0 and (" · " .. #document.warnings .. " warning(s)") or ""}.`)
+    Selection:Set({ container })
+end
+
+local function importCode()
+    local code = string.upper(string.gsub(codeInput.Text, "%s", ""))
+    if not string.match(code, "^[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]$") then setStatus("Enter the 6-character code from Figma.", true); return end
+    setStatus("Downloading " .. code .. "…")
+    local ok, result = pcall(function() return httpGet("/api/exports/" .. HttpService:UrlEncode(code)) end)
+    if not ok then setStatus(tostring(result), true); return end
+    importDocument(result)
+end
+
+local function setMode(nextMode: string)
+    mode = nextMode
+    codePanel.Visible = mode == "code"
+    livePanel.Visible = mode == "live"
+    codeTab.BackgroundColor3 = mode == "code" and COLORS.accentDark or COLORS.panel2
+    liveTab.BackgroundColor3 = mode == "live" and COLORS.accentDark or COLORS.panel2
+end
+
+codeTab.Activated:Connect(function() setMode("code") end)
+liveTab.Activated:Connect(function() setMode("live") end)
+fitPlacement.Activated:Connect(function() placementMode = "fit"; fitPlacement.BackgroundColor3 = COLORS.accentDark; exactPlacement.BackgroundColor3 = COLORS.panel2 end)
+exactPlacement.Activated:Connect(function() placementMode = "exact"; exactPlacement.BackgroundColor3 = COLORS.accentDark; fitPlacement.BackgroundColor3 = COLORS.panel2 end)
+importCodeButton.Activated:Connect(importCode)
+codeInput.FocusLost:Connect(function(enterPressed) if enterPressed then importCode() end end)
+autoButton.Activated:Connect(function() autoSync = not autoSync; autoButton.Text = "Auto-sync: " .. (autoSync and "On" or "Off") end)
+
+local pollToken = 0
+local function connectLive()
+    local code = string.upper(string.gsub(liveInput.Text, "%s", ""))
+    if not string.match(code, "^L%-[A-Z0-9]+$") then setStatus("Enter the L-XXXXXX code from Figma.", true); return end
+    connected = not connected
+    pollToken += 1
+    connectButton.Text = connected and "Disconnect" or "Connect"
+    if not connected then setStatus("Live link disconnected."); return end
+    local token = pollToken
+    liveRevision = 0
+    setStatus("Live link connected. Waiting for Figma…")
+    task.spawn(function()
+        while connected and token == pollToken do
+            local ok, result = pcall(function() return httpGet("/api/live/" .. HttpService:UrlEncode(code) .. "/latest?after=" .. tostring(liveRevision)) end)
+            if ok and result and result.revision and result.document then
+                liveRevision = result.revision
+                if autoSync then importDocument(result.document) else setStatus("Live revision " .. tostring(liveRevision) .. " is ready.") end
+            elseif not ok then setStatus(tostring(result), true) end
+            task.wait(1)
+        end
+    end)
+end
+connectButton.Activated:Connect(connectLive)
+setMode("code")
+fitPlacement.BackgroundColor3 = COLORS.accentDark
+
+local function selectedGui(): GuiObject?
+    local first = Selection:Get()[1]
+    return first and first:IsA("GuiObject") and first or nil
+end
+
+local function editSelected(labelText: string, callback: (GuiObject) -> ())
+    local object = selectedGui()
+    if not object then setStatus("Select a GuiObject first.", true); return end
+    ChangeHistoryService:SetWaypoint("Before " .. labelText)
+    callback(object)
+    ChangeHistoryService:SetWaypoint(labelText)
+end
+
+left.Activated:Connect(function() editSelected("Move UI left", function(o) o.Position -= UDim2.fromOffset(1, 0) end) end)
+right.Activated:Connect(function() editSelected("Move UI right", function(o) o.Position += UDim2.fromOffset(1, 0) end) end)
+up.Activated:Connect(function() editSelected("Move UI up", function(o) o.Position -= UDim2.fromOffset(0, 1) end) end)
+down.Activated:Connect(function() editSelected("Move UI down", function(o) o.Position += UDim2.fromOffset(0, 1) end) end)
+smaller.Activated:Connect(function() editSelected("Shrink UI", function(o) o.Size -= UDim2.fromOffset(2, 2) end) end)
+larger.Activated:Connect(function() editSelected("Grow UI", function(o) o.Size += UDim2.fromOffset(2, 2) end) end)
+
+local function convertClass(targetClass: string)
+    editSelected("Convert UI class", function(old)
+        if old.ClassName == targetClass then return end
+        local replacement = new(targetClass, nil, old.Parent) :: GuiObject
+        replacement.Name = old.Name
+        replacement.Position = old.Position
+        replacement.Size = old.Size
+        replacement.AnchorPoint = old.AnchorPoint
+        replacement.Rotation = old.Rotation
+        replacement.Visible = old.Visible
+        replacement.ZIndex = old.ZIndex
+        replacement:SetAttribute("FWSourceId", old:GetAttribute("FWSourceId"))
+        replacement:SetAttribute("FWTags", old:GetAttribute("FWTags"))
+        for _, child in ipairs(old:GetChildren()) do child.Parent = replacement end
+        old:Destroy()
+        Selection:Set({ replacement })
+    end)
+end
+
+for _, className in ipairs({ "Frame", "TextLabel", "TextButton", "ImageLabel", "ImageButton", "TextBox" }) do
+    local classButton = button(classRow, className, 1/3)
+    classButton.TextSize = 9
+    classButton.Activated:Connect(function() convertClass(className) end)
+end
+
+Selection.SelectionChanged:Connect(function()
+    local object = selectedGui()
+    selectedLabel.Text = object and (`Selected: {object.Name} · {object.ClassName}`) or "Select a GuiObject to edit."
+end)
+
+importButton.Click:Connect(function() widget.Enabled = not widget.Enabled; setMode("code") end)
+toolsButton.Click:Connect(function() widget.Enabled = true; toolsTitle.TextColor3 = COLORS.accent end)
+plugin.Unloading:Connect(function() connected = false; pollToken += 1 end)
+]]></ProtectedString><string name="Name">FramewispLocal</string><bool name="Disabled">false</bool><Content name="LinkedSource"><null></null></Content></Properties></Item></roblox>

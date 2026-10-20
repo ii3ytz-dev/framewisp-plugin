@@ -1,0 +1,1763 @@
+<roblox version="4"><External>null</External><External>nil</External><Item class="Script" referent="RBX_EFFECTS_EDITOR"><Properties><ProtectedString name="Source"><![CDATA[--!strict
+-- Framewisp Effects — effects-only Roblox Studio editor.
+
+local Selection = game:GetService("Selection")
+local ChangeHistoryService = game:GetService("ChangeHistoryService")
+local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local StarterPlayer = game:GetService("StarterPlayer")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+
+local runtimeSource = [==[
+-- Framewisp Local bootstrap. Effect implementations live in sibling ModuleScripts.
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local modulesFolder = ReplicatedStorage:WaitForChild("FramewispEffects")
+local Shared = require(modulesFolder:WaitForChild("Shared"))
+local Resolver = require(modulesFolder:WaitForChild("Resolver"))
+local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
+local context = Shared.create(playerGui)
+
+local effects = {}
+for _, child in ipairs(modulesFolder:GetChildren()) do
+    if child:IsA("ModuleScript") and child.Name ~= "Shared" and child.Name ~= "Resolver" then
+        local ok, effect = pcall(require, child)
+        if ok and type(effect) == "table" and type(effect.tag) == "string" and type(effect.setup) == "function" then
+            effects[effect.tag] = effect
+        else
+            warn("Framewisp effect module failed:", child:GetFullName(), effect)
+        end
+    end
+end
+
+local installed = setmetatable({}, { __mode = "k" })
+local watching = setmetatable({}, { __mode = "k" })
+
+local function scan(object)
+    if not object:IsA("GuiObject") then return end
+    context:wireObject(object)
+    installed[object] = installed[object] or {}
+    local added = false
+    for tag, effect in pairs(effects) do
+        if not installed[object][tag] and Resolver.matches(context, object, effect) then
+            installed[object][tag] = true
+            added = true
+            local ok, message = pcall(effect.setup, context, object)
+            if not ok then warn("Framewisp effect setup failed:", tag, object:GetFullName(), message) end
+        end
+    end
+    if added and context.started and object.Visible then context:emit(object, "show") end
+    if not watching[object] then
+        watching[object] = true
+        object.AttributeChanged:Connect(function() scan(object) end)
+    end
+end
+
+for _, object in ipairs(context:objects()) do scan(object) end
+playerGui.DescendantAdded:Connect(function(object) task.defer(scan, object) end)
+
+context:finish()
+]==]
+local runtimeModules = {
+    ["Billboard"] = [========[return {
+    tag = "_billboard",
+    setup = function(ctx, object)
+        local gui = object:FindFirstAncestorOfClass("BillboardGui")
+        if not gui then return end
+        local width = tonumber(ctx:attr(object, "bbStuds", 8)) or 8
+        gui.Size = UDim2.fromScale(width, width * object.AbsoluteSize.Y / math.max(1, object.AbsoluteSize.X)); gui.AlwaysOnTop = ctx:attr(object, "bbTop", true)
+        gui.Active = tonumber(ctx:attr(object, "bbClick", 0)) == 1
+        pcall(function() gui.MaxDistance = tonumber(ctx:attr(object, "bbDist", 0)) or 0 end)
+    end,
+}]========],
+    ["Blink"] = [========[return {
+    tag = "_blink",
+    setup = function(ctx, object)
+        task.spawn(function()
+            task.wait(tonumber(ctx:attr(object, "blinkDelay", 0)) or 0)
+            while object.Parent do
+                ctx:tweenAlpha(object, ctx:attr(object, "blinkFade", .25), 0); task.wait(tonumber(ctx:attr(object, "blinkOn", 1.2)) or 1.2)
+                ctx:tweenAlpha(object, ctx:attr(object, "blinkFade", .25), 1); task.wait(tonumber(ctx:attr(object, "blinkOff", .8)) or .8)
+            end
+        end)
+    end,
+}]========],
+    ["Burst"] = [========[return {
+    tag = "_burst",
+    setup = function(ctx, button)
+        if not button:IsA("GuiButton") then return end
+        ctx:on(button, "activate", function()
+            local count = math.clamp(math.floor(tonumber(ctx:attr(button, "burstCount", 12)) or 12), 1, 60)
+            local duration = tonumber(ctx:attr(button, "burstTime", .6)) or .6
+            local reach = tonumber(ctx:attr(button, "burstDist", .6)) or .6
+            local minSize = tonumber(ctx:attr(button, "burstSize", 12)) or 12
+            local maxSize = tonumber(ctx:attr(button, "burstSizeMax", minSize)) or minSize
+            local parent = button.Parent
+            if not parent then return end
+            local parentOrigin = parent:IsA("GuiObject") and parent.AbsolutePosition or Vector2.zero
+            local center = button.AbsolutePosition - parentOrigin + button.AbsoluteSize / 2
+            local image = tostring(ctx:attr(button, "burstImg", "") or "")
+            if image ~= "" and not string.find(image, "rbxassetid://", 1, true) then image = "rbxassetid://" .. image end
+            local randomEdge = tonumber(ctx:attr(button, "burstRandom", 0)) == 1 or ctx:attr(button, "burstRandom", false) == true
+            for index = 1, count do
+                local particle = Instance.new(image ~= "" and "ImageLabel" or "Frame")
+                particle.Name = "FramewispBurst"; particle.AnchorPoint = Vector2.new(.5, .5)
+                local origin = center
+                if randomEdge then
+                    local edge, along = math.random(1, 4), math.random()
+                    if edge == 1 then origin = button.AbsolutePosition - parentOrigin + Vector2.new(button.AbsoluteSize.X * along, 0)
+                    elseif edge == 2 then origin = button.AbsolutePosition - parentOrigin + Vector2.new(button.AbsoluteSize.X, button.AbsoluteSize.Y * along)
+                    elseif edge == 3 then origin = button.AbsolutePosition - parentOrigin + Vector2.new(button.AbsoluteSize.X * along, button.AbsoluteSize.Y)
+                    else origin = button.AbsolutePosition - parentOrigin + Vector2.new(0, button.AbsoluteSize.Y * along) end
+                end
+                particle.Position = UDim2.fromOffset(origin.X, origin.Y)
+                local size = minSize + math.random() * math.max(0, maxSize - minSize)
+                particle.Size = UDim2.fromOffset(size, size); particle.BackgroundTransparency = 1
+                particle.BorderSizePixel = 0; particle.ZIndex = math.max(1, button.ZIndex - 1); particle.Parent = parent
+                local color = ctx:hex(ctx:attr(button, "burstColor", "#ffffff"), Color3.new(1, 1, 1))
+                local transparencyProperty = "BackgroundTransparency"
+                if particle:IsA("ImageLabel") then particle.Image = image; particle.ImageColor3 = color; particle.ImageTransparency = tonumber(ctx:attr(button, "burstAlpha", 0)) or 0; transparencyProperty = "ImageTransparency"
+                else particle.BackgroundColor3 = color; particle.BackgroundTransparency = tonumber(ctx:attr(button, "burstAlpha", 0)) or 0; local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(1, 0); corner.Parent = particle end
+                local angle = randomEdge and math.random() * math.pi * 2 or (index / count) * math.pi * 2
+                local distance = math.max(button.AbsoluteSize.X, button.AbsoluteSize.Y) * reach * (.65 + math.random() * .35)
+                local properties = { Position = particle.Position + UDim2.fromOffset(math.cos(angle) * distance, math.sin(angle) * distance), Rotation = ctx:attr(button, "burstSpin", false) and (tonumber(ctx:attr(button, "burstSpinSpeed", 360)) or 360) or 0 }
+                properties[transparencyProperty] = 1
+                if ctx:attr(button, "burstShrink", true) then properties.Size = UDim2.fromOffset(0, 0) end
+                task.delay((index % 4) * .02, function() if particle.Parent then local animation = ctx:tween(particle, duration, properties); animation.Completed:Connect(function() particle:Destroy() end) end end)
+            end
+        end)
+    end,
+}]========],
+    ["Button"] = [========[return {
+    tag = "_button",
+    setup = function(ctx, button)
+        if not button:IsA("GuiButton") then return end
+        local baseScale = ctx:scale(button)
+        local function tint(on, amountKey)
+            local amount = tonumber(ctx:attr(button, amountKey, amountKey == "pressDim" and .62 or .8)) or .8
+            local targets = { button }
+            for _, child in ipairs(button:GetDescendants()) do if child:IsA("GuiObject") and not ctx:has(child, "_nodim") and not ctx:has(child, "_color") then table.insert(targets, child) end end
+            for _, target in ipairs(targets) do
+                local base = ctx:rememberValue(target, "buttonColor", ctx:color(target))
+                ctx:paint(target, on and Color3.new(base.R * amount, base.G * amount, base.B * amount) or base)
+            end
+        end
+        ctx:on(button, "enter", function() tint(true, "hoverDim"); ctx:playSound(button, "hoverSound") end)
+        ctx:on(button, "leave", function() tint(false, "hoverDim"); ctx:tween(baseScale, .15, { Scale = 1 }) end)
+        ctx:on(button, "down", function() tint(true, "pressDim"); ctx:tween(baseScale, .06, { Scale = tonumber(ctx:attr(button, "pressScale", .985)) or .985 }) end)
+        ctx:on(button, "up", function() tint(true, "hoverDim"); ctx:tween(baseScale, .12, { Scale = 1 }, Enum.EasingStyle.Back) end)
+        ctx:on(button, "activate", function() ctx:playSound(button, "clickSound") end)
+    end,
+}]========],
+    ["Card"] = [========[return {
+    tag = "_card",
+    setup = function(ctx, card)
+        card.Visible = false
+        local scale = ctx:scale(card)
+        local turned = false
+        local back = card:FindFirstChild("Back")
+        local front = card:FindFirstChild("Front")
+        if back and back:IsA("GuiObject") then back.Visible = false end
+        local function matches(button)
+            local owner = card:GetAttribute("FWParam_card")
+            return owner and owner == button.Name or not owner and (card.Parent == button or card.Parent == button.Parent)
+        end
+        local function point(index, size)
+            index = math.clamp(math.floor(tonumber(index) or 4), 0, 8)
+            return Vector2.new((index % 3) * size.X / 2, math.floor(index / 3) * size.Y / 2)
+        end
+        local function targetFor(button)
+            local parent = card.Parent
+            local parentOrigin = parent and parent:IsA("GuiObject") and parent.AbsolutePosition or Vector2.zero
+            local buttonPoint = point(ctx:attr(card, "cardPoint", 4), button.AbsoluteSize)
+            local cardCorner = point(ctx:attr(card, "cardCorner", 6), card.AbsoluteSize)
+            local target = button.AbsolutePosition - parentOrigin + buttonPoint - cardCorner + Vector2.new(tonumber(ctx:attr(card, "cardX", 0)) or 0, tonumber(ctx:attr(card, "cardY", 0)) or 0)
+            if ctx:attr(card, "cardFlip", true) and parent and parent:IsA("GuiObject") then
+                target = Vector2.new(math.clamp(target.X, 0, math.max(0, parent.AbsoluteSize.X - card.AbsoluteSize.X)), math.clamp(target.Y, 0, math.max(0, parent.AbsoluteSize.Y - card.AbsoluteSize.Y)))
+            end
+            return UDim2.fromOffset(target.X + card.AnchorPoint.X * card.AbsoluteSize.X, target.Y + card.AnchorPoint.Y * card.AbsoluteSize.Y)
+        end
+        ctx:onGlobal("enter", function(button)
+            if not button:IsA("GuiButton") or not matches(button) then return end
+            task.delay(tonumber(ctx:attr(card, "cardDelay", .25)) or .25, function()
+                if not card.Parent then return end
+                local target = targetFor(button)
+                local mode, seconds = tonumber(ctx:attr(card, "cardIn", 0)) or 0, tonumber(ctx:attr(card, "cardTime", .16)) or .16
+                card:SetAttribute("Owner", button.Name); card.Visible = true
+                if mode == 0 then card.Position = button.Position; ctx:tween(card, seconds, { Position = target }, Enum.EasingStyle.Back)
+                else card.Position = target end
+                if mode == 1 then scale.Scale = .72; ctx:tween(scale, seconds, { Scale = 1 }, Enum.EasingStyle.Back)
+                elseif mode == 2 then ctx:setAlpha(card, 1); ctx:tweenAlpha(card, seconds, 0) end
+                ctx:emit(card, "show")
+            end)
+        end)
+        ctx:onGlobal("leave", function(button) if matches(button) then task.delay(tonumber(ctx:attr(card, "cardHide", .15)) or .15, function() if card.Parent and not (ctx:attr(card, "cardSticky", true) and card:GetAttribute("FWHovered")) then card.Visible = false end end) end end)
+        ctx:onGlobal("activate", function(button)
+            if not matches(button) or not ctx:attr(card, "cardTurn", false) or not back or not back:IsA("GuiObject") then return end
+            turned = not turned
+            local seconds = tonumber(ctx:attr(card, "cardTurnTime", .4)) or .4
+            ctx:tween(scale, seconds / 2, { Scale = .05 }).Completed:Connect(function()
+                if not card.Parent then return end
+                back.Visible = turned
+                if front and front:IsA("GuiObject") then front.Visible = not turned
+                else for _, child in ipairs(card:GetChildren()) do if child:IsA("GuiObject") and child ~= back then child.Visible = not turned end end end
+                ctx:tween(scale, seconds / 2, { Scale = 1 }, Enum.EasingStyle.Back)
+            end)
+        end)
+        card.MouseEnter:Connect(function() card:SetAttribute("FWHovered", true) end)
+        card.MouseLeave:Connect(function() card:SetAttribute("FWHovered", false) end)
+    end,
+}]========],
+    ["Cascade"] = [========[return {
+    tag = "_cascade",
+    setup = function(ctx, object)
+        ctx:on(object, "show", function()
+            local gap, index = (tonumber(ctx:attr(object, "cascadeGap", 70)) or 70) / 1000, 0
+            for _, child in ipairs(object:GetChildren()) do
+                if child:IsA("GuiObject") then
+                    local scale = ctx:scale(child); scale.Scale = 0
+                    task.delay(index * gap, function() if child.Parent then ctx:tween(scale, .35, { Scale = 1 }, Enum.EasingStyle.Back) end end)
+                    index += 1
+                end
+            end
+        end)
+    end,
+}]========],
+    ["Color"] = [========[return {
+    tag = "_color",
+    setup = function(ctx, object)
+        local button = ctx:buttonFor(object)
+        if not button and object:IsA("GuiButton") then button = object end
+        if not button then return end
+        local base = ctx:rememberValue(object, "hoverColor", ctx:color(object))
+        local property = (object:IsA("ImageLabel") or object:IsA("ImageButton")) and "ImageColor3" or (object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox")) and "TextColor3" or "BackgroundColor3"
+        local gradient = object:FindFirstChild("FramewispColorGradient")
+        if gradient and not gradient:IsA("UIGradient") then gradient:Destroy(); gradient = nil end
+        ctx:on(button, "enter", function()
+            local primaryValue = ctx:attr(object, "colorPick", "-1")
+            if tostring(primaryValue) == "-1" or tostring(primaryValue) == "" then return end
+            local primary = ctx:hex(primaryValue, base)
+            local secondValue = ctx:attr(object, "colorPick2", "-1")
+            if tostring(secondValue) ~= "-1" and tostring(secondValue) ~= "" then
+                gradient = gradient or Instance.new("UIGradient")
+                gradient.Name = "FramewispColorGradient"; gradient.Color = ColorSequence.new(primary, ctx:hex(secondValue, primary)); gradient.Rotation = tonumber(ctx:attr(object, "colorAngle", 0)) or 0; gradient.Enabled = true; gradient.Parent = object
+            else ctx:tween(object, ctx:attr(object, "colorIn", .14), { [property] = primary }) end
+        end)
+        ctx:on(button, "leave", function()
+            if gradient then gradient.Enabled = false end
+            ctx:tween(object, ctx:attr(object, "colorOut", .25), { [property] = base })
+        end)
+    end,
+}]========],
+    ["Drift"] = [========[return {
+    tag = "_drift",
+    setup = function(ctx, object)
+        local base, travelled = object.Position, Vector2.zero
+        ctx.runService.RenderStepped:Connect(function(delta)
+            if not object.Parent then return end
+            local angle, speed = math.rad(tonumber(ctx:attr(object, "driftAngle", 270)) or 270), tonumber(ctx:attr(object, "driftSpeed", 40)) or 40
+            travelled += Vector2.new(math.sin(angle), -math.cos(angle)) * speed * delta
+            local width, height = math.max(1, object.AbsoluteSize.X), math.max(1, object.AbsoluteSize.Y)
+            travelled = Vector2.new(((travelled.X + width) % (width * 2)) - width, ((travelled.Y + height) % (height * 2)) - height)
+            object.Position = base + UDim2.fromOffset(travelled.X, travelled.Y)
+        end)
+    end,
+}]========],
+    ["Drop"] = [========[return {
+    tag = "_drop",
+    setup = function(ctx, object)
+        local function drop(target, delayTime)
+            task.delay(delayTime, function()
+                if not target.Parent then return end
+                local base = ctx:remember(target, "Position", "dropPosition") or target.Position
+                local distance = tonumber(ctx:attr(object, "dropHeight", 160)) or 160
+                target.Position = base - UDim2.fromOffset(0, distance)
+                if ctx:attr(object, "dropFade", true) then ctx:setAlpha(target, 1); ctx:tweenAlpha(target, ctx:attr(object, "dropTime", .6), 0) end
+                local animation = ctx:tween(target, ctx:attr(object, "dropTime", .6), { Position = base }, Enum.EasingStyle.Bounce)
+                animation.Completed:Connect(function() ctx:playSound(object, "dropSound") end)
+            end)
+        end
+        ctx:on(object, "show", function()
+            local delayTime = tonumber(ctx:attr(object, "dropDelay", 0)) or 0
+            if ctx:attr(object, "dropKids", false) then
+                local index = 0
+                for _, child in ipairs(object:GetChildren()) do if child:IsA("GuiObject") then drop(child, delayTime + index * (tonumber(ctx:attr(object, "dropStep", .06)) or .06)); index += 1 end end
+            else drop(object, delayTime) end
+        end)
+    end,
+}]========],
+    ["Fadein"] = [========[return {
+    tag = "_fadein",
+    setup = function(ctx, object)
+        ctx:on(object, "show", function()
+            task.delay(tonumber(ctx:attr(object, "fadeinDelay", 0)) or 0, function()
+                if not object.Parent then return end
+                ctx:setAlpha(object, 1)
+                ctx:tweenAlpha(object, ctx:attr(object, "fadeinTime", .35), 0)
+            end)
+        end)
+    end,
+}]========],
+    ["Fall"] = [========[local function imageIds(value)
+    local result = {}
+    for token in string.gmatch(tostring(value or ""), "[^,%s;]+") do
+        if #result >= 4 then break end
+        table.insert(result, string.find(token, "rbxassetid://", 1, true) and token or "rbxassetid://" .. token)
+    end
+    return result
+end
+
+return {
+    tag = "_fall",
+    setup = function(ctx, object)
+        object.ClipsDescendants = true
+        local sequence = 0
+        task.spawn(function()
+            while object.Parent do
+                local images = imageIds(ctx:attr(object, "fallImg", ""))
+                local particle = Instance.new(#images > 0 and "ImageLabel" or "Frame")
+                particle.Name = "FramewispFallParticle"
+                particle.AnchorPoint = Vector2.new(.5, .5)
+                particle.BackgroundTransparency = 1
+                particle.BorderSizePixel = 0
+                particle.ZIndex = object.ZIndex + 1
+                local minimum = tonumber(ctx:attr(object, "fallScale", .6)) or .6
+                local maximum = tonumber(ctx:attr(object, "fallScaleMax", 1)) or 1
+                local scale = minimum + math.random() * math.max(0, maximum - minimum)
+                local base = math.max(8, math.min(object.AbsoluteSize.X, object.AbsoluteSize.Y) * .12)
+                particle.Size = UDim2.fromOffset(base * scale, base * scale)
+                local keepApart = ctx:attr(object, "fallSpread", false) == true
+                local count = math.max(1, math.floor(tonumber(ctx:attr(object, "fallCount", 12)) or 12))
+                local gap = tonumber(ctx:attr(object, "fallGap", 1)) or 1
+                sequence += 1
+                local x = keepApart and (((sequence - 1) % count + .5) / count) or math.random()
+                x = math.clamp(.5 + (x - .5) * math.min(1, gap), 0, 1)
+                particle.Position = UDim2.new(x, 0, 0, -base)
+                particle.Rotation = (math.random() * 2 - 1) * (tonumber(ctx:attr(object, "fallTilt", 40)) or 40)
+                if particle:IsA("ImageLabel") then
+                    particle.Image = images[(sequence - 1) % #images + 1]
+                    particle.ImageColor3 = Color3.new(1, 1, 1)
+                    particle.ImageTransparency = tonumber(ctx:attr(object, "fallAlpha", .75)) or .75
+                else
+                    particle.BackgroundColor3 = ctx:color(object)
+                    particle.BackgroundTransparency = tonumber(ctx:attr(object, "fallAlpha", .75)) or .75
+                end
+                particle.Parent = object
+                local duration = tonumber(ctx:attr(object, "fallTime", 6)) or 6
+                local properties = { Position = UDim2.new(x, 0, 1, base), Rotation = particle.Rotation }
+                if ctx:attr(object, "fallSpin", false) then properties.Rotation += (tonumber(ctx:attr(object, "fallSpinSpeed", 90)) or 90) * duration end
+                local animation = ctx:tween(particle, duration, properties, Enum.EasingStyle.Linear)
+                animation.Completed:Connect(function() particle:Destroy() end)
+                task.wait(duration / count)
+            end
+        end)
+    end,
+}]========],
+    ["Float"] = [========[return {
+    tag = "_float",
+    setup = function(ctx, object)
+        local base = object.Position
+        ctx.runService.RenderStepped:Connect(function()
+            if object.Parent then
+                local distance, speed = tonumber(ctx:attr(object, "floatDist", 8)) or 8, tonumber(ctx:attr(object, "floatSpeed", .6)) or .6
+                local angle = math.rad(tonumber(ctx:attr(object, "floatAngle", 0)) or 0)
+                local value = math.sin(time() * math.pi * 2 * speed) * distance / 2
+                object.Position = base + UDim2.fromOffset(math.sin(angle) * value, -math.cos(angle) * value)
+            end
+        end)
+    end,
+}]========],
+    ["Flow"] = [========[return {
+    tag = "_flow",
+    setup = function(ctx, object)
+        local gradients = {}
+        for _, child in ipairs(object:GetDescendants()) do if child:IsA("UIGradient") then table.insert(gradients, child) end end
+        for _, child in ipairs(object:GetChildren()) do if child:IsA("UIGradient") and not table.find(gradients, child) then table.insert(gradients, child) end end
+        if #gradients == 0 then local gradient = Instance.new("UIGradient"); gradient.Parent = object; table.insert(gradients, gradient) end
+        for _, gradient in ipairs(gradients) do
+            gradient.Rotation = tonumber(ctx:attr(object, "flowAngle", 0)) or 0
+            gradient.Offset = Vector2.new((tonumber(ctx:attr(object, "flowOffsetX", 0)) or 0) + (tonumber(ctx:attr(object, "flowPhase", 0)) or 0), tonumber(ctx:attr(object, "flowOffsetY", 0)) or 0)
+            if tonumber(ctx:attr(object, "flowMode", 0)) == 1 then gradient.Color = ColorSequence.new({ ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 70, 90)), ColorSequenceKeypoint.new(.2, Color3.fromRGB(255, 220, 70)), ColorSequenceKeypoint.new(.4, Color3.fromRGB(70, 255, 130)), ColorSequenceKeypoint.new(.6, Color3.fromRGB(70, 200, 255)), ColorSequenceKeypoint.new(.8, Color3.fromRGB(150, 80, 255)), ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 70, 90)) }) end
+        end
+        ctx.runService.RenderStepped:Connect(function(delta)
+            if not object.Parent then return end
+            for _, gradient in ipairs(gradients) do
+                if tonumber(ctx:attr(object, "flowMove", 0)) == 1 then gradient.Rotation += (tonumber(ctx:attr(object, "flowRotate", 180)) or 180) * delta
+                else
+                    local angle, speed = math.rad(tonumber(ctx:attr(object, "flowDirection", 0)) or 0), tonumber(ctx:attr(object, "flowSpeed", .5)) or .5
+                    gradient.Offset += Vector2.new(math.cos(angle), math.sin(angle)) * speed * delta
+                    if math.abs(gradient.Offset.X) > 1 or math.abs(gradient.Offset.Y) > 1 then gradient.Offset = Vector2.new(gradient.Offset.X % 1, gradient.Offset.Y % 1) end
+                end
+            end
+        end)
+    end,
+}]========],
+    ["Focus"] = [========[return { tag = "_focus", setup = function(ctx, object) ctx:registerFocus(object) end }]========],
+    ["Gleam"] = [========[return {
+    tag = "_gleam",
+    setup = function(ctx, object)
+        local gradient = object:FindFirstChildOfClass("UIGradient") or Instance.new("UIGradient")
+        gradient.Name = "FramewispGleam"; gradient.Parent = object
+        gradient.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(.5, 0), NumberSequenceKeypoint.new(1, 1) })
+        task.spawn(function()
+            while object.Parent do
+                gradient.Offset = Vector2.new(-1, 0)
+                ctx:tween(gradient, ctx:attr(object, "gleamSpeed", .8), { Offset = Vector2.new(1, 0) }, Enum.EasingStyle.Linear).Completed:Wait()
+                task.wait(tonumber(ctx:attr(object, "gleamCooldown", 2)) or 2)
+            end
+        end)
+    end,
+}]========],
+    ["Glint"] = [========[return {
+    tag = "_glint",
+    setup = function(ctx, object)
+        local button = ctx:buttonFor(object)
+        if not button then return end
+        local parent = object.Parent
+        if parent and parent:IsA("GuiObject") then parent.ClipsDescendants = true end
+        local base = object.Position
+        object.Visible = true
+        ctx:on(button, "enter", function()
+            object.Position = UDim2.new(base.X.Scale - 1.2, base.X.Offset, base.Y.Scale, base.Y.Offset)
+            ctx:tween(object, 1 / math.max(.1, tonumber(ctx:attr(object, "glintSpeed", 1.8)) or 1.8), { Position = UDim2.new(base.X.Scale + 1.2, base.X.Offset, base.Y.Scale, base.Y.Offset) }, Enum.EasingStyle.Linear)
+        end)
+    end,
+}]========],
+    ["Glow"] = [========[return {
+    tag = "_glow",
+    setup = function(ctx, object)
+        local stroke = object:FindFirstChildOfClass("UIStroke") or Instance.new("UIStroke")
+        stroke.Parent = object; stroke.Color = ctx:hex(ctx:attr(object, "glowColor", "#ffffff"), Color3.new(1, 1, 1))
+        local base = stroke.Thickness
+        ctx.runService.RenderStepped:Connect(function()
+            if object.Parent then stroke.Thickness = base + (1 + math.sin(time() * math.pi * 2 * (tonumber(ctx:attr(object, "glowSpeed", .8)) or .8))) * (tonumber(ctx:attr(object, "glowSize", 12)) or 12) / 8 end
+        end)
+    end,
+}]========],
+    ["Hold"] = [========[return { tag = "_hold", setup = function(ctx, object) ctx:registerHold(object) end }]========],
+    ["Jelly"] = [========[return {
+    tag = "_jelly",
+    setup = function(ctx, object)
+        local scale, base, phase = ctx:scale(object), object.Rotation, math.random() * math.pi * 2
+        ctx.runService.RenderStepped:Connect(function()
+            if object.Parent then
+                local wave = math.sin(time() * math.pi * 2 * (tonumber(ctx:attr(object, "jellySpeed", 1.2)) or 1.2) + phase)
+                object.Rotation = base + wave * (tonumber(ctx:attr(object, "jellyAmp", 3)) or 3); scale.Scale = 1 + wave * .02
+            end
+        end)
+    end,
+}]========],
+    ["Lean"] = [========[return {
+    tag = "_lean",
+    setup = function(ctx, object)
+        local base = object.Rotation
+        object.MouseEnter:Connect(function() ctx:tween(object, ctx:attr(object, "leanTime", .14), { Rotation = base + (tonumber(ctx:attr(object, "leanAngle", -8)) or -8) }) end)
+        object.MouseLeave:Connect(function() ctx:tween(object, ctx:attr(object, "leanTime", .14), { Rotation = base }) end)
+    end,
+}]========],
+    ["Magnet"] = [========[local UserInputService = game:GetService("UserInputService")
+return {
+    tag = "_magnet",
+    setup = function(ctx, button)
+        if not button:IsA("GuiButton") then return end
+        local base = button.Position
+        ctx.runService.RenderStepped:Connect(function()
+            if not button.Parent then return end
+            local mouse = UserInputService:GetMouseLocation()
+            local center = button.AbsolutePosition + button.AbsoluteSize / 2
+            local delta = mouse - center
+            local radius = tonumber(ctx:attr(button, "magnetRadius", 60)) or 60
+            if delta.Magnitude < radius then
+                local pull = tonumber(ctx:attr(button, "magnetPull", .35)) or .35
+                button.Position = base + UDim2.fromOffset(delta.X * pull, delta.Y * pull)
+            else
+                button.Position = base
+            end
+        end)
+    end,
+}]========],
+    ["Pixels"] = [========[return {
+    tag = "_pixels",
+    setup = function(ctx, object)
+        object.ClipsDescendants = true
+        task.spawn(function()
+            while object.Parent do
+                local cell = tonumber(ctx:attr(object, "pixCell", 14)) or 14
+                if ctx:attr(object, "pixVary", false) then cell *= .55 + math.random() * .9 end
+                local pixel = Instance.new("Frame")
+                pixel.Name = "FramewispPixel"; pixel.Size = UDim2.fromOffset(cell, cell); pixel.Position = UDim2.fromScale(math.random(), math.random()); pixel.AnchorPoint = Vector2.new(.5, .5)
+                pixel.BackgroundColor3 = ctx:hex(ctx:attr(object, "pixColor", "#ffffff"), Color3.new(1, 1, 1)); pixel.BackgroundTransparency = 1; pixel.BorderSizePixel = 0; pixel.ZIndex = object.ZIndex + 10; pixel.Parent = object
+                ctx:tween(pixel, .18, { BackgroundTransparency = 1 - (tonumber(ctx:attr(object, "pixAlpha", .35)) or .35) }).Completed:Wait()
+                ctx:tween(pixel, .3, { BackgroundTransparency = 1 }).Completed:Connect(function() pixel:Destroy() end)
+                task.wait(1 / math.max(.5, tonumber(ctx:attr(object, "pixRate", 8)) or 8))
+            end
+        end)
+    end,
+}]========],
+    ["Pointer"] = [========[return {
+    tag = "_pointer",
+    setup = function(ctx, pointer)
+        pointer.Visible = false
+        local baseRotation = pointer.Rotation
+        local scale = ctx:scale(pointer)
+        local function matches(button)
+            local menu = pointer.Parent
+            return menu and not ctx:has(button, "_nopointer") and (button.Parent == menu or button:IsDescendantOf(menu))
+        end
+        local function show(button)
+            if not button:IsA("GuiButton") or not matches(button) then return end
+            local wasVisible = pointer.Visible
+            pointer.Visible = true
+            local nudge, side = tonumber(ctx:attr(pointer, "pointerNudge", 0)) or 0, tonumber(ctx:attr(pointer, "pointerSide", 0)) or 0
+            local target = button.Position
+            if side == 1 then target -= UDim2.fromOffset(pointer.AbsoluteSize.X + nudge, 0) elseif side == 2 then target += UDim2.fromOffset(button.AbsoluteSize.X + nudge, 0) elseif side == 3 then target -= UDim2.fromOffset(0, pointer.AbsoluteSize.Y + nudge) elseif side == 4 then target += UDim2.fromOffset(0, button.AbsoluteSize.Y + nudge) end
+            if ctx:attr(pointer, "pointerTurn", true) then
+                if side == 1 then pointer.Rotation = 0 elseif side == 2 then pointer.Rotation = 180 elseif side == 3 then pointer.Rotation = 90 elseif side == 4 then pointer.Rotation = -90 else pointer.Rotation = baseRotation end
+            end
+            local appear = tonumber(ctx:attr(pointer, "pointerIn", 0)) or 0
+            if appear == 0 then scale.Scale = .65; ctx:tween(scale, .18, { Scale = 1 }, Enum.EasingStyle.Back)
+            elseif appear == 1 then ctx:setAlpha(pointer, 1); ctx:tweenAlpha(pointer, .16, 0)
+            elseif appear == 2 and not wasVisible then pointer.Position = target + UDim2.fromOffset(0, 12) end
+            local bounce = tonumber(ctx:attr(pointer, "pointerBounce", .25)) or .25
+            ctx:tween(pointer, 1 / math.max(1, tonumber(ctx:attr(pointer, "pointerSpeed", 5)) or 5), { Position = target }, bounce > 0 and Enum.EasingStyle.Back or Enum.EasingStyle.Quad)
+        end
+        ctx:onGlobal("enter", show)
+        ctx:onGlobal("leave", function(button) if matches(button) then task.delay(tonumber(ctx:attr(pointer, "pointerHold", .5)) or .5, function() if pointer.Parent then pointer.Visible = false end end) end end)
+        ctx:onGlobal("down", function(button) if matches(button) then local poke = tonumber(ctx:attr(pointer, "pointerPress", 10)) or 10; ctx:tween(pointer, .08, { Position = pointer.Position + UDim2.fromOffset(0, poke) }) end end)
+        ctx.guiService:GetPropertyChangedSignal("SelectedObject"):Connect(function()
+            if ctx:attr(pointer, "pointerPad", true) then
+                local selected = ctx.guiService.SelectedObject
+                if selected and selected:IsA("GuiButton") then show(selected) end
+            end
+        end)
+        local started = time()
+        ctx.runService.RenderStepped:Connect(function()
+            if not pointer.Parent then return end
+            if pointer.Visible and ctx:attr(pointer, "pointerBob", true) then
+                local amplitude = tonumber(ctx:attr(pointer, "pointerBobAmp", 4)) or 4
+                scale.Scale = 1 + math.sin((time() - started) * math.pi * 2) * amplitude / math.max(40, pointer.AbsoluteSize.Y) * .08
+            end
+        end)
+    end,
+}]========],
+    ["Pop"] = [========[return {
+    tag = "_pop",
+    setup = function(ctx, object)
+        ctx:on(object, "show", function()
+            local scale = ctx:scale(object)
+            scale.Scale = tonumber(ctx:attr(object, "popFrom", .8)) or .8
+            ctx:tween(scale, ctx:attr(object, "popTime", .3), { Scale = 1 }, Enum.EasingStyle.Back)
+        end)
+    end,
+}]========],
+    ["Prompt"] = [========[return {
+    tag = "_prompt",
+    setup = function(ctx, object)
+        local gui = object:FindFirstAncestorWhichIsA("LayerCollector")
+        local anchor = nil
+        pcall(function() anchor = gui.Adornee end)
+        local prompt = anchor and anchor:FindFirstChildOfClass("ProximityPrompt")
+        if not prompt then return end
+        prompt.HoldDuration = tonumber(ctx:attr(object, "promptHold", .6)) or .6; prompt.MaxActivationDistance = tonumber(ctx:attr(object, "promptDist", 10)) or 10
+        local key = tostring(ctx:attr(object, "promptKey", "E"))
+        pcall(function() prompt.KeyboardKeyCode = Enum.KeyCode[key] end)
+    end,
+}]========],
+    ["Pulse"] = [========[return {
+    tag = "_pulse",
+    setup = function(ctx, object)
+        local scale = ctx:scale(object)
+        ctx.runService.RenderStepped:Connect(function()
+            if object.Parent then
+                local amplitude = (tonumber(ctx:attr(object, "pulseAmp", 5)) or 5) / 100
+                local speed = tonumber(ctx:attr(object, "pulseSpeed", 1)) or 1
+                scale.Scale = 1 + math.max(0, math.sin(time() * math.pi * 2 * speed)) * amplitude
+            end
+        end)
+    end,
+}]========],
+    ["Rays"] = [========[return {
+    tag = "_rays",
+    setup = function(ctx, object)
+        local scale = ctx:scale(object)
+        ctx.runService.RenderStepped:Connect(function(delta)
+            if not object.Parent then return end
+            object.Rotation += (tonumber(ctx:attr(object, "raysSpeed", 25)) or 25) * delta
+            local amplitude = (tonumber(ctx:attr(object, "raysPulse", 6)) or 6) / 100
+            scale.Scale = 1 + math.max(0, math.sin(time() * math.pi * 2)) * amplitude
+        end)
+    end,
+}]========],
+    ["Resolver"] = [========[-- Resolves effects from tags or from their exported/manual attributes.
+-- Attribute-only activation intentionally ignores keys shared by multiple effects;
+-- ambiguous configurations still need an explicit FWTags entry.
+local Resolver = {}
+
+local attributes = {
+    _button = { "hoverDim", "pressDim", "pressScale", "hoverSound", "clickSound" },
+    _smooth = { "hoverScale", "pressScale", "hoverSound", "clickSound" },
+    _up = { "upDist", "upTime" },
+    _turn = { "turnAngle", "turnTime" },
+    _squish = { "squishAmp", "squishTime" },
+    _ripple = { "rippleColor", "rippleOp", "rippleTime" },
+    _magnet = { "magnetPull", "magnetRadius" },
+    _select = { "selectColor", "selectWidth", "selectPop", "selectTime" },
+    _color = { "colorPick", "colorPick2", "colorAngle", "colorIn", "colorOut" },
+    _glint = { "glintSpeed" },
+    _burst = { "burstImg", "burstCount", "burstRandom", "burstTime", "burstDist", "burstAlpha", "burstSize", "burstSizeMax", "burstShrink", "burstSpin", "burstSpinSpeed", "burstColor" },
+    _pointer = { "pointerSide", "pointerNudge", "pointerTurn", "pointerIn", "pointerSpeed", "pointerBounce", "pointerPress", "pointerHold", "pointerBob", "pointerBobAmp", "pointerPad" },
+    _card = { "cardCorner", "cardPoint", "cardX", "cardY", "cardIn", "cardTime", "cardDelay", "cardHide", "cardFlip", "cardSticky", "cardTurn", "cardTurnTime" },
+    _lean = { "leanAngle", "leanTime" },
+    _pop = { "popFrom", "popTime" },
+    _fadein = { "fadeinTime", "fadeinDelay" },
+    _drop = { "dropHeight", "dropTime", "dropBounce", "dropSquash", "dropFade", "dropDelay", "dropKids", "dropStep", "dropSound" },
+    _reveal = { "revealAngle", "revealTime", "revealDir", "revealFrom" },
+    _swing = { "swingAngle", "swingCount", "swingTime", "swingFrom" },
+    _cascade = { "cascadeGap" },
+    _spin = { "spinSpeed" },
+    _rays = { "raysSpeed", "raysPulse" },
+    _pulse = { "pulseAmp", "pulseSpeed" },
+    _float = { "floatDist", "floatSpeed", "floatAngle" },
+    _jelly = { "jellyAmp", "jellySpeed" },
+    _blink = { "blinkOn", "blinkOff", "blinkFade", "blinkDelay" },
+    _shake = { "shakeAmp", "shakeTime", "shakeEvery" },
+    _wiggle = { "wiggleAngle", "wiggleEvery" },
+    _glow = { "glowSize", "glowSpeed", "glowColor" },
+    _pixels = { "pixCell", "pixVary", "pixRate", "pixColor", "pixAlpha" },
+    _shiny = { "shineSpeed", "shineCooldown" },
+    _gleam = { "gleamSpeed", "gleamCooldown", "gleamWidth" },
+    _stroke = { "strokeMode", "strokeAngle", "strokeRotate", "strokeDirection", "strokeSpeed", "strokeStretch", "strokeOffsetX", "strokeOffsetY", "strokePhase" },
+    _flow = { "flowMove", "flowAngle", "flowRotate", "flowDirection", "flowSpeed", "flowStretch", "flowOffsetX", "flowOffsetY", "flowPhase", "flowOn", "flowMode" },
+    _drift = { "driftSpeed", "driftAngle" },
+    _fall = { "fallImg", "fallCount", "fallTime", "fallAlpha", "fallScale", "fallScaleMax", "fallTilt", "fallSpread", "fallGap", "fallSpin", "fallSpinSpeed" },
+    _3d = { "tiltMax" },
+    _tilt = { "tiltY", "tiltX", "tiltPersp" },
+    _billboard = { "bbStuds", "bbTop", "bbDist", "bbClick" },
+    _surface = { "sfStuds", "sfTop", "sfDist" },
+    _prompt = { "promptKey", "promptHold", "promptDist" },
+    _hold = { "holdColor" },
+    _focus = { "focusFov", "focusBlur", "focusDim", "focusTime" },
+    _shadow = { "shadowColor", "shadowColor2", "shadowAlpha", "shadowX", "shadowY", "shadowBlur", "shadowSpread", "shadowInset" },
+    _scroll = { "scrollDir", "scrollBar", "scrollExtL", "scrollExtR", "scrollExtT", "scrollExtB" },
+}
+
+local owners = {}
+for tag, keys in pairs(attributes) do
+    for _, key in ipairs(keys) do
+        owners[key] = owners[key] or {}
+        owners[key][tag] = true
+    end
+end
+
+local function pascal(key)
+    return string.upper(string.sub(key, 1, 1)) .. string.sub(key, 2)
+end
+
+local function compatible(ctx, object, tag)
+    if tag == "_scroll" then return object:IsA("ScrollingFrame") end
+    if tag == "_button" or tag == "_smooth" or tag == "_up" or tag == "_turn" or tag == "_squish" or tag == "_ripple" or tag == "_magnet" or tag == "_burst" then return object:IsA("GuiButton") end
+    if tag == "_glint" or tag == "_color" or tag == "_select" then return object:IsA("GuiButton") or ctx:buttonFor(object) ~= nil end
+    if tag == "_billboard" then return object:FindFirstAncestorOfClass("BillboardGui") ~= nil end
+    if tag == "_surface" then return object:FindFirstAncestorOfClass("SurfaceGui") ~= nil end
+    if tag == "_prompt" then return object:FindFirstAncestorWhichIsA("LayerCollector") ~= nil end
+    return object:IsA("GuiObject")
+end
+
+function Resolver.matches(ctx, object, effect)
+    if ctx:has(object, effect.tag) then return true end
+    if not compatible(ctx, object, effect.tag) then return false end
+    for _, key in ipairs(attributes[effect.tag] or {}) do
+        local count = 0
+        for _ in pairs(owners[key]) do count += 1 end
+        if count == 1 and (object:GetAttribute(key) ~= nil or object:GetAttribute(pascal(key)) ~= nil) then return true end
+    end
+    return false
+end
+
+Resolver.attributes = attributes
+return Resolver]========],
+    ["Reveal"] = [========[return {
+    tag = "_reveal",
+    setup = function(ctx, object)
+        ctx:on(object, "show", function()
+            local scale, baseRotation = ctx:scale(object), ctx:remember(object, "Rotation", "revealRotation") or object.Rotation
+            scale.Scale = tonumber(ctx:attr(object, "revealFrom", .55)) or .55
+            object.Rotation = baseRotation + (tonumber(ctx:attr(object, "revealAngle", 35)) or 35)
+            local seconds = tonumber(ctx:attr(object, "revealTime", .7)) or .7
+            ctx:tween(scale, seconds, { Scale = 1 }, Enum.EasingStyle.Back)
+            ctx:tween(object, seconds, { Rotation = baseRotation }, Enum.EasingStyle.Elastic)
+        end)
+    end,
+}]========],
+    ["Ripple"] = [========[return {
+    tag = "_ripple",
+    setup = function(ctx, button)
+        if not button:IsA("GuiButton") then return end
+        ctx:on(button, "down", function()
+            button.ClipsDescendants = true
+            local wave = Instance.new("Frame")
+            wave.Name = "FramewispRipple"; wave.AnchorPoint = Vector2.new(.5, .5); wave.Position = UDim2.fromScale(.5, .5); wave.Size = UDim2.fromOffset(0, 0)
+            wave.BackgroundColor3 = ctx:hex(ctx:attr(button, "rippleColor", "#ffffff"), Color3.new(1, 1, 1)); wave.BackgroundTransparency = 1 - (tonumber(ctx:attr(button, "rippleOp", .4)) or .4)
+            wave.BorderSizePixel = 0; wave.ZIndex = button.ZIndex + 20; wave.Parent = button
+            local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(1, 0); corner.Parent = wave
+            local diameter = math.sqrt(button.AbsoluteSize.X ^ 2 + button.AbsoluteSize.Y ^ 2) * 2
+            local animation = ctx:tween(wave, ctx:attr(button, "rippleTime", .45), { Size = UDim2.fromOffset(diameter, diameter), BackgroundTransparency = 1 })
+            animation.Completed:Connect(function() wave:Destroy() end)
+        end)
+    end,
+}]========],
+    ["Scroll"] = [========[return {
+    tag = "_scroll",
+    setup = function(ctx, object)
+        if not object:IsA("ScrollingFrame") then return end
+        object.ScrollBarThickness = tonumber(ctx:attr(object, "scrollBar", 6)) or 6
+        local direction = tonumber(ctx:attr(object, "scrollDir", 0)) or 0
+        if direction == 1 then object.AutomaticCanvasSize = Enum.AutomaticSize.Y; object.ScrollingDirection = Enum.ScrollingDirection.Y
+        elseif direction == 2 then object.AutomaticCanvasSize = Enum.AutomaticSize.X; object.ScrollingDirection = Enum.ScrollingDirection.X
+        else object.AutomaticCanvasSize = Enum.AutomaticSize.XY; object.ScrollingDirection = Enum.ScrollingDirection.XY end
+        local left, right = tonumber(ctx:attr(object, "scrollExtL", 0)) or 0, tonumber(ctx:attr(object, "scrollExtR", 0)) or 0
+        local top, bottom = tonumber(ctx:attr(object, "scrollExtT", 0)) or 0, tonumber(ctx:attr(object, "scrollExtB", 0)) or 0
+        object.Position -= UDim2.fromOffset(left, top)
+        object.Size += UDim2.fromOffset(left + right, top + bottom)
+    end,
+}]========],
+    ["Select"] = [========[return {
+    tag = "_select",
+    setup = function(ctx, object)
+        local button = object:IsA("GuiButton") and object or ctx:buttonFor(object)
+        if not button then return end
+        ctx:on(button, "activate", function()
+            local owner = ctx:nearest(button, "_select") or object
+            local parent = owner.Parent
+            local previous = ctx.selectedByParent[parent]
+            local selected = previous ~= owner
+            if previous and previous ~= owner then previous:SetAttribute("FWSelected", false) end
+            ctx.selectedByParent[parent] = selected and owner or nil
+            owner:SetAttribute("FWSelected", selected)
+            if parent then parent:SetAttribute("FWSelected", selected and button.Name or "") end
+            local stroke = owner:FindFirstChildOfClass("UIStroke") or Instance.new("UIStroke")
+            stroke.Parent = owner; stroke.Color = ctx:hex(ctx:attr(owner, "selectColor", "#4ade80"), Color3.fromRGB(74, 222, 128)); stroke.Thickness = tonumber(ctx:attr(owner, "selectWidth", 3)) or 3
+            ctx:tween(stroke, ctx:attr(owner, "selectTime", .18), { Transparency = selected and 0 or 1 })
+            local scale = ctx:scale(owner)
+            if selected then ctx:tween(scale, ctx:attr(owner, "selectTime", .18), { Scale = tonumber(ctx:attr(owner, "selectPop", 1.06)) or 1.06 }, Enum.EasingStyle.Back)
+            else ctx:tween(scale, ctx:attr(owner, "selectTime", .18), { Scale = 1 }) end
+        end)
+    end,
+}]========],
+    ["Shadow"] = [========[return {
+    tag = "_shadow",
+    setup = function(ctx, object)
+        if not object.Parent or not object.Parent:IsA("GuiObject") then return end
+        local shadow = object:Clone()
+        for _, child in ipairs(shadow:GetDescendants()) do if child:IsA("LuaSourceContainer") then child:Destroy() end end
+        shadow.Name = "FramewispShadow"; shadow:SetAttribute("FWTags", "[]"); shadow.Active = false
+        shadow.Position = object.Position + UDim2.fromOffset(tonumber(ctx:attr(object, "shadowX", 0)) or 0, tonumber(ctx:attr(object, "shadowY", 8)) or 8)
+        local spread = tonumber(ctx:attr(object, "shadowSpread", 0)) or 0
+        local inset = ctx:attr(object, "shadowInset", false) == true
+        shadow.Size = object.Size + UDim2.fromOffset(spread * 2, spread * 2); shadow.ZIndex = inset and object.ZIndex + 1 or math.max(0, object.ZIndex - 1)
+        local primary = ctx:hex(ctx:attr(object, "shadowColor", "#000000"), Color3.new(0, 0, 0))
+        ctx:paint(shadow, primary); ctx:setAlpha(shadow, 1 - (tonumber(ctx:attr(object, "shadowAlpha", .35)) or .35))
+        local secondValue = ctx:attr(object, "shadowColor2", "-1")
+        if tostring(secondValue) ~= "-1" and tostring(secondValue) ~= "" then
+            local second = ctx:hex(secondValue, primary)
+            local gradient = shadow:FindFirstChildOfClass("UIGradient") or Instance.new("UIGradient")
+            gradient.Name = "FramewispShadowGradient"; gradient.Color = ColorSequence.new(primary, second); gradient.Rotation = 45; gradient.Parent = shadow
+        end
+        shadow.Parent = object.Parent
+    end,
+}]========],
+    ["Shake"] = [========[return {
+    tag = "_shake",
+    setup = function(ctx, object)
+        task.spawn(function()
+            local base = object.Position
+            while object.Parent do
+                local duration, amplitude = tonumber(ctx:attr(object, "shakeTime", .5)) or .5, tonumber(ctx:attr(object, "shakeAmp", 6)) or 6
+                local started = time()
+                while object.Parent and time() - started < duration do
+                    local decay = 1 - (time() - started) / duration
+                    object.Position = base + UDim2.fromOffset((math.random() * 2 - 1) * amplitude * decay, (math.random() * 2 - 1) * amplitude * decay)
+                    ctx.runService.RenderStepped:Wait()
+                end
+                if object.Parent then object.Position = base end
+                task.wait(math.max(0, (tonumber(ctx:attr(object, "shakeEvery", 3)) or 3) - duration))
+            end
+        end)
+    end,
+}]========],
+    ["Shared"] = [========[-- Shared runtime services for Framewisp effect modules.
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local Lighting = game:GetService("Lighting")
+local HttpService = game:GetService("HttpService")
+local GuiService = game:GetService("GuiService")
+
+local Shared = {}
+local Context = {}
+Context.__index = Context
+
+local function pascal(key)
+    return string.upper(string.sub(key, 1, 1)) .. string.sub(key, 2)
+end
+
+function Shared.create(root)
+    local self = setmetatable({}, Context)
+    self.root = root
+    self.player = Players.LocalPlayer
+    self.runService = RunService
+    self.guiService = GuiService
+    self.original = setmetatable({}, { __mode = "k" })
+    self.hooks = setmetatable({}, { __mode = "k" })
+    self.globalHooks = {}
+    self.selectedByParent = setmetatable({}, { __mode = "k" })
+    self.focusPanels = setmetatable({}, { __mode = "k" })
+    self.bindingLabels = {}
+    self.holds = {}
+    self.wired = setmetatable({}, { __mode = "k" })
+    self.promptWired = setmetatable({}, { __mode = "k" })
+    self.holdsByPrompt = setmetatable({}, { __mode = "k" })
+    self.started = false
+    self.panels = {}
+    self.baseFov = workspace.CurrentCamera and workspace.CurrentCamera.FieldOfView or 70
+    for _, object in ipairs(root:GetDescendants()) do
+        if object:IsA("GuiObject") and self:has(object, "_panel") then self.panels[object.Name] = object end
+    end
+    return self
+end
+
+function Context:objects()
+    local result = {}
+    for _, object in ipairs(self.root:GetDescendants()) do
+        if object:IsA("GuiObject") then table.insert(result, object) end
+    end
+    return result
+end
+
+function Context:tags(object)
+    local ok, value = pcall(function() return HttpService:JSONDecode(object:GetAttribute("FWTags") or "[]") end)
+    return ok and type(value) == "table" and value or {}
+end
+
+function Context:has(object, tag)
+    for _, value in ipairs(self:tags(object)) do if value == tag then return true end end
+    return false
+end
+
+function Context:attr(object, key, fallback)
+    local manual = object:GetAttribute(pascal(key))
+    if manual ~= nil then return manual end
+    local exported = object:GetAttribute(key)
+    if exported ~= nil then return exported end
+    return fallback
+end
+
+function Context:tween(object, seconds, properties, style, direction)
+    local info = TweenInfo.new(math.max(0, tonumber(seconds) or 0), style or Enum.EasingStyle.Quad, direction or Enum.EasingDirection.Out)
+    local animation = TweenService:Create(object, info, properties)
+    animation:Play()
+    return animation
+end
+
+function Context:scale(object)
+    local value = object:FindFirstChild("FramewispScale")
+    if value and value:IsA("UIScale") then return value end
+    value = Instance.new("UIScale")
+    value.Name = "FramewispScale"
+    value.Parent = object
+    return value
+end
+
+function Context:hex(value, fallback)
+    if typeof(value) == "Color3" then return value end
+    if typeof(value) ~= "string" then return fallback end
+    local hex = string.gsub(value, "#", "")
+    if #hex ~= 6 then return fallback end
+    local number = tonumber(hex, 16)
+    if not number then return fallback end
+    return Color3.fromRGB(math.floor(number / 65536) % 256, math.floor(number / 256) % 256, number % 256)
+end
+
+function Context:remember(object, property, key)
+    local bucket = self.original[object]
+    if not bucket then bucket = {}; self.original[object] = bucket end
+    key = key or property
+    if bucket[key] == nil then
+        local ok, value = pcall(function() return object[property] end)
+        if ok then bucket[key] = value end
+    end
+    return bucket[key]
+end
+
+function Context:rememberValue(object, key, value)
+    local bucket = self.original[object]
+    if not bucket then bucket = {}; self.original[object] = bucket end
+    if bucket[key] == nil then bucket[key] = value end
+    return bucket[key]
+end
+
+function Context:setAlpha(object, alpha)
+    local targets = { object }
+    for _, descendant in ipairs(object:GetDescendants()) do table.insert(targets, descendant) end
+    for _, target in ipairs(targets) do
+        if target:IsA("CanvasGroup") then
+            local base = self:remember(target, "GroupTransparency") or 0
+            target.GroupTransparency = base + (1 - base) * alpha
+        elseif target:IsA("GuiObject") then
+            local base = self:remember(target, "BackgroundTransparency") or 0
+            target.BackgroundTransparency = base + (1 - base) * alpha
+            if target:IsA("ImageLabel") or target:IsA("ImageButton") then
+                local imageBase = self:remember(target, "ImageTransparency") or 0
+                target.ImageTransparency = imageBase + (1 - imageBase) * alpha
+            end
+            if target:IsA("TextLabel") or target:IsA("TextButton") or target:IsA("TextBox") then
+                local textBase = self:remember(target, "TextTransparency") or 0
+                target.TextTransparency = textBase + (1 - textBase) * alpha
+                local strokeBase = self:remember(target, "TextStrokeTransparency") or 1
+                target.TextStrokeTransparency = strokeBase + (1 - strokeBase) * alpha
+            end
+        elseif target:IsA("UIStroke") then
+            local base = self:remember(target, "Transparency") or 0
+            target.Transparency = base + (1 - base) * alpha
+        end
+    end
+end
+
+function Context:tweenAlpha(object, seconds, alpha)
+    if object:IsA("CanvasGroup") then
+        local base = self:remember(object, "GroupTransparency") or 0
+        return self:tween(object, seconds, { GroupTransparency = base + (1 - base) * alpha })
+    end
+    local proxy = Instance.new("NumberValue")
+    proxy.Value = alpha == 0 and 1 or 0
+    proxy.Changed:Connect(function(value) if object.Parent then self:setAlpha(object, value) end end)
+    local animation = self:tween(proxy, seconds, { Value = alpha })
+    animation.Completed:Connect(function() proxy:Destroy() end)
+    return animation
+end
+
+function Context:color(object)
+    if object:IsA("ImageLabel") or object:IsA("ImageButton") then return object.ImageColor3 end
+    if object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox") then return object.TextColor3 end
+    return object.BackgroundColor3
+end
+
+function Context:paint(object, color)
+    if object:IsA("ImageLabel") or object:IsA("ImageButton") then object.ImageColor3 = color
+    elseif object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox") then object.TextColor3 = color
+    else object.BackgroundColor3 = color end
+end
+
+function Context:playSound(object, key)
+    local value = tostring(self:attr(object, key, ""))
+    if value == "" or value == "0" then return end
+    local sound = Instance.new("Sound")
+    sound.Name = "FramewispSound"
+    sound.SoundId = string.find(value, "rbxassetid://", 1, true) and value or "rbxassetid://" .. value
+    sound.Parent = object
+    sound.Ended:Connect(function() sound:Destroy() end)
+    sound:Play()
+end
+
+function Context:on(object, event, callback)
+    local bucket = self.hooks[object]
+    if not bucket then bucket = {}; self.hooks[object] = bucket end
+    bucket[event] = bucket[event] or {}
+    table.insert(bucket[event], callback)
+end
+
+function Context:onGlobal(event, callback)
+    self.globalHooks[event] = self.globalHooks[event] or {}
+    table.insert(self.globalHooks[event], callback)
+end
+
+function Context:emit(object, event, ...)
+    local bucket = self.hooks[object]
+    for _, callback in ipairs(bucket and bucket[event] or {}) do
+        local ok, message = pcall(callback, ...)
+        if not ok then warn("Framewisp hook failed:", event, message) end
+    end
+    for _, callback in ipairs(self.globalHooks[event] or {}) do
+        local ok, message = pcall(callback, object, ...)
+        if not ok then warn("Framewisp global hook failed:", event, message) end
+    end
+end
+
+function Context:buttonFor(object)
+    local current = object
+    while current and current ~= self.root do
+        if current:IsA("GuiButton") then return current end
+        current = current.Parent
+    end
+    return nil
+end
+
+function Context:nearest(object, tag)
+    local current = object.Parent
+    while current and current ~= self.root do
+        if self:has(current, tag) then return current end
+        current = current.Parent
+    end
+    return nil
+end
+
+function Context:enabled(button)
+    if not button.Active then return false end
+    local ok, value = pcall(function() return button.Interactable end)
+    return not ok or value ~= false
+end
+
+function Context:variant(button, state)
+    for _, child in ipairs(button:GetChildren()) do
+        if child:IsA("GuiObject") then
+            if self:has(child, "_default") then child.Visible = state == "default"
+            elseif self:has(child, "_hover") then child.Visible = state == "hover"
+            elseif self:has(child, "_clicked") then child.Visible = state == "clicked"
+            elseif self:has(child, "_disabled") then child.Visible = state == "disabled"
+            elseif self:has(child, "_active") then child.Visible = state == "active" end
+        end
+    end
+end
+
+function Context:registerFocus(object)
+    self.focusPanels[object] = false
+end
+
+function Context:updateFocus()
+    local count, blurSize, dim, fovDelta, seconds = 0, 0, 0, 0, .35
+    for panel, active in pairs(self.focusPanels) do
+        if active and panel.Parent and panel.Visible then
+            count += 1
+            blurSize = math.max(blurSize, tonumber(self:attr(panel, "focusBlur", 18)) or 18)
+            dim = math.max(dim, tonumber(self:attr(panel, "focusDim", 0)) or 0)
+            fovDelta = math.min(fovDelta, tonumber(self:attr(panel, "focusFov", -8)) or -8)
+            seconds = math.max(seconds, tonumber(self:attr(panel, "focusTime", .35)) or .35)
+        end
+    end
+    local blur = Lighting:FindFirstChild("FramewispFocusBlur") or Instance.new("BlurEffect")
+    blur.Name = "FramewispFocusBlur"; blur.Parent = Lighting
+    local correction = Lighting:FindFirstChild("FramewispFocusDim") or Instance.new("ColorCorrectionEffect")
+    correction.Name = "FramewispFocusDim"; correction.Parent = Lighting
+    self:tween(blur, seconds, { Size = count > 0 and blurSize or 0 })
+    self:tween(correction, seconds, { Brightness = count > 0 and -dim or 0 })
+    local camera = workspace.CurrentCamera
+    if camera then self:tween(camera, seconds, { FieldOfView = count > 0 and self.baseFov + fovDelta or self.baseFov }) end
+end
+
+function Context:show(panel, on)
+    if not panel then return end
+    panel.Visible = on
+    if self.focusPanels[panel] ~= nil then self.focusPanels[panel] = on; self:updateFocus() end
+    if on then
+        self:emit(panel, "show")
+        for _, child in ipairs(panel:GetDescendants()) do if child:IsA("GuiObject") then self:emit(child, "show") end end
+    end
+end
+
+function Context:resolveBinding(binding)
+    if binding == "PlayerName" or binding == "Player" then return self.player.Name end
+    if binding == "DisplayName" then return self.player.DisplayName end
+    local attribute = string.match(binding, "^attr:(.+)$")
+    if attribute then return self.player:GetAttribute(attribute) end
+    local current = self.player
+    local path = string.find(binding, "%.") and binding or "leaderstats." .. binding
+    for part in string.gmatch(path, "[^%.]+") do current = current and current:FindFirstChild(part) or nil end
+    if current and current:IsA("ValueBase") then return current.Value end
+    return current and current.Name or nil
+end
+
+function Context:bind(label)
+    if label:GetAttribute("FWTextTemplate") == nil then label:SetAttribute("FWTextTemplate", label.Text) end
+    table.insert(self.bindingLabels, label)
+end
+
+function Context:refreshBinding(label)
+    local direct = label:GetAttribute("FWParam_bind") or label:GetAttribute("FWParam_binding")
+    local template = label:GetAttribute("FWTextTemplate") or label.Text
+    if direct then label.Text = tostring(self:resolveBinding(tostring(direct)) or ""); return end
+    label.Text = string.gsub(template, "{([^{}]+)}", function(binding)
+        local value = self:resolveBinding(binding)
+        return value == nil and "" or tostring(value)
+    end)
+end
+
+function Context:registerHold(object)
+    table.insert(self.holds, object)
+    if self.started then self:setupPrompt() end
+end
+
+function Context:activateTab(button)
+    local target = button:GetAttribute("FWParam_tab")
+    if not target then return end
+    local group = self:nearest(button, "_tabgroup") or self.root
+    for _, candidate in ipairs(group:GetDescendants()) do
+        if candidate:IsA("GuiButton") then
+            local candidateTarget = candidate:GetAttribute("FWParam_tab")
+            if candidateTarget then
+                local active = candidate == button
+                self:variant(candidate, active and "active" or "default")
+                if self.panels[candidateTarget] then self:show(self.panels[candidateTarget], active) end
+            end
+        end
+    end
+end
+
+function Context:wireAction(button)
+    local closeName = button:GetAttribute("FWParam_close")
+    if self:has(button, "_close") then self:show(closeName and self.panels[closeName] or self:nearest(button, "_panel") or self.root, false) end
+    local openName = button:GetAttribute("FWParam_open")
+    if openName then self:show(self.panels[openName], true) end
+    local toggleName = button:GetAttribute("FWParam_toggle")
+    if toggleName and self.panels[toggleName] then self:show(self.panels[toggleName], not self.panels[toggleName].Visible) end
+    if button:GetAttribute("FWParam_tab") then self:activateTab(button) end
+end
+
+function Context:setupPrompt()
+    if #self.holds == 0 then return end
+    for _, object in ipairs(self.holds) do
+        local gui = object:FindFirstAncestorWhichIsA("LayerCollector")
+        local anchor = nil
+        if gui then pcall(function() anchor = gui.Adornee end) end
+        local prompt = anchor and anchor:FindFirstChildOfClass("ProximityPrompt")
+        if prompt then
+            self.holdsByPrompt[prompt] = self.holdsByPrompt[prompt] or {}
+            if not table.find(self.holdsByPrompt[prompt], object) then table.insert(self.holdsByPrompt[prompt], object) end
+            if not self.promptWired[prompt] then
+                self.promptWired[prompt] = true
+                local function amount(value)
+                    for _, hold in ipairs(self.holdsByPrompt[prompt] or {}) do
+                        local gradient = hold:FindFirstChildOfClass("UIGradient") or Instance.new("UIGradient")
+                        gradient.Parent = hold
+                        local color = self:hex(self:attr(hold, "holdColor", "#22c55e"), Color3.fromRGB(34, 197, 94))
+                        gradient.Color = ColorSequence.new(color, color)
+                        local edge = math.clamp(value, 0, 1)
+                        gradient.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(edge, 0), NumberSequenceKeypoint.new(math.min(1, edge + .001), 1), NumberSequenceKeypoint.new(1, 1) })
+                    end
+                end
+                prompt.PromptShown:Connect(function() if gui then gui.Enabled = true end end)
+                prompt.PromptHidden:Connect(function() if gui then gui.Enabled = false end; amount(0) end)
+                prompt.PromptButtonHoldBegan:Connect(function()
+                    local started = time()
+                    task.spawn(function()
+                        while prompt.Parent and time() - started <= prompt.HoldDuration do
+                            amount(prompt.HoldDuration <= 0 and 1 or (time() - started) / prompt.HoldDuration)
+                            RunService.RenderStepped:Wait()
+                        end
+                    end)
+                end)
+                prompt.PromptButtonHoldEnded:Connect(function() amount(0) end)
+            end
+        end
+    end
+end
+
+function Context:wireObject(object)
+    if self.wired[object] then return end
+    self.wired[object] = true
+    if self:has(object, "_panel") then self.panels[object.Name] = object end
+    if object:IsA("TextLabel") and (string.find(object.Text, "{", 1, true) or object:GetAttribute("FWParam_bind") or object:GetAttribute("FWParam_binding")) then self:bind(object); self:refreshBinding(object) end
+    if object:IsA("GuiButton") then
+        local button = object
+        self:variant(button, self:enabled(button) and "default" or "disabled")
+        button.MouseEnter:Connect(function() if self:enabled(button) then self:variant(button, "hover"); self:emit(button, "enter") else self:variant(button, "disabled") end end)
+        button.MouseLeave:Connect(function() self:variant(button, self:enabled(button) and "default" or "disabled"); self:emit(button, "leave") end)
+        button.MouseButton1Down:Connect(function() if self:enabled(button) then self:variant(button, "clicked"); self:emit(button, "down") end end)
+        button.MouseButton1Up:Connect(function() if self:enabled(button) then self:variant(button, "hover"); self:emit(button, "up") end end)
+        button.Activated:Connect(function() if self:enabled(button) then self:emit(button, "activate"); self:wireAction(button) end end)
+        button:GetPropertyChangedSignal("Active"):Connect(function() self:variant(button, self:enabled(button) and "default" or "disabled") end)
+    end
+end
+
+function Context:finish()
+    for _, object in ipairs(self:objects()) do self:wireObject(object) end
+    for _, object in ipairs(self:objects()) do if object.Visible then self:emit(object, "show") end end
+    for _, group in ipairs(self:objects()) do
+        if self:has(group, "_tabgroup") then
+            for _, candidate in ipairs(group:GetDescendants()) do if candidate:IsA("GuiButton") and candidate:GetAttribute("FWParam_tab") then self:activateTab(candidate); break end end
+        end
+    end
+    self:setupPrompt()
+    self.started = true
+    task.spawn(function()
+        while self.root.Parent do
+            for index = #self.bindingLabels, 1, -1 do
+                local label = self.bindingLabels[index]
+                if label.Parent then self:refreshBinding(label) else table.remove(self.bindingLabels, index) end
+            end
+            task.wait(.25)
+        end
+    end)
+    GuiService.AutoSelectGuiEnabled = true
+end
+
+return Shared]========],
+    ["Shiny"] = [========[return {
+    tag = "_shiny",
+    setup = function(ctx, object)
+        local parent = object.Parent
+        if not parent or not parent:IsA("GuiObject") then return end
+        parent.ClipsDescendants = true; object.Visible = true
+        local base = object.Position
+        local function sweep()
+            if not object.Parent then return end
+            object.Position = UDim2.new(base.X.Scale - 1.2, base.X.Offset, base.Y.Scale, base.Y.Offset)
+            local animation = ctx:tween(object, 1 / math.max(.1, tonumber(ctx:attr(object, "shineSpeed", 1.2)) or 1.2), { Position = UDim2.new(base.X.Scale + 1.2, base.X.Offset, base.Y.Scale, base.Y.Offset) }, Enum.EasingStyle.Linear)
+            animation.Completed:Connect(function() task.delay(tonumber(ctx:attr(object, "shineCooldown", 2)) or 2, sweep) end)
+        end
+        sweep()
+    end,
+}]========],
+    ["Smooth"] = [========[return {
+    tag = "_smooth",
+    setup = function(ctx, button)
+        if not button:IsA("GuiButton") then return end
+        local scale = ctx:scale(button)
+        ctx:on(button, "enter", function() ctx:tween(scale, .12, { Scale = tonumber(ctx:attr(button, "hoverScale", 1.08)) or 1.08 }); ctx:playSound(button, "hoverSound") end)
+        ctx:on(button, "leave", function() ctx:tween(scale, .18, { Scale = 1 }) end)
+        ctx:on(button, "down", function() ctx:tween(scale, .06, { Scale = tonumber(ctx:attr(button, "pressScale", .9)) or .9 }) end)
+        ctx:on(button, "up", function() ctx:tween(scale, .14, { Scale = tonumber(ctx:attr(button, "hoverScale", 1.08)) or 1.08 }, Enum.EasingStyle.Back) end)
+        ctx:on(button, "activate", function() ctx:playSound(button, "clickSound") end)
+    end,
+}]========],
+    ["Spin"] = [========[return {
+    tag = "_spin",
+    setup = function(ctx, object)
+        ctx.runService.RenderStepped:Connect(function(delta) if object.Parent then object.Rotation += (tonumber(ctx:attr(object, "spinSpeed", 120)) or 120) * delta end end)
+    end,
+}]========],
+    ["Squish"] = [========[return {
+    tag = "_squish",
+    setup = function(ctx, button)
+        if not button:IsA("GuiButton") then return end
+        local base = button.Size
+        ctx:on(button, "down", function()
+            local amount = (tonumber(ctx:attr(button, "squishAmp", 10)) or 10) / 100
+            ctx:tween(button, .08, { Size = UDim2.new(base.X.Scale * (1 + amount), base.X.Offset, base.Y.Scale * (1 - amount), base.Y.Offset) })
+        end)
+        ctx:on(button, "up", function() ctx:tween(button, ctx:attr(button, "squishTime", .18), { Size = base }, Enum.EasingStyle.Back) end)
+        ctx:on(button, "leave", function() ctx:tween(button, ctx:attr(button, "squishTime", .18), { Size = base }, Enum.EasingStyle.Back) end)
+    end,
+}]========],
+    ["Stroke"] = [========[return {
+    tag = "_stroke",
+    setup = function(ctx, object)
+        local gradients = {}
+        for _, child in ipairs(object:GetDescendants()) do if child:IsA("UIGradient") and child.Parent:IsA("UIStroke") then table.insert(gradients, child) end end
+        local stroke = object:FindFirstChildOfClass("UIStroke")
+        if stroke and #gradients == 0 then local gradient = Instance.new("UIGradient"); gradient.Parent = stroke; table.insert(gradients, gradient) end
+        for _, gradient in ipairs(gradients) do
+            gradient.Rotation = tonumber(ctx:attr(object, "strokeAngle", 0)) or 0
+            gradient.Offset = Vector2.new((tonumber(ctx:attr(object, "strokeOffsetX", 0)) or 0) + (tonumber(ctx:attr(object, "strokePhase", 0)) or 0), tonumber(ctx:attr(object, "strokeOffsetY", 0)) or 0)
+        end
+        ctx.runService.RenderStepped:Connect(function(delta)
+            if not object.Parent then return end
+            for _, gradient in ipairs(gradients) do
+                if tonumber(ctx:attr(object, "strokeMode", 0)) == 0 then gradient.Rotation += (tonumber(ctx:attr(object, "strokeRotate", 45)) or 45) * delta
+                else
+                    local angle, speed = math.rad(tonumber(ctx:attr(object, "strokeDirection", 0)) or 0), tonumber(ctx:attr(object, "strokeSpeed", .35)) or .35
+                    gradient.Offset += Vector2.new(math.cos(angle), math.sin(angle)) * speed * delta
+                    if math.abs(gradient.Offset.X) > 1 or math.abs(gradient.Offset.Y) > 1 then gradient.Offset = Vector2.new(gradient.Offset.X % 1, gradient.Offset.Y % 1) end
+                end
+            end
+        end)
+    end,
+}]========],
+    ["Surface"] = [========[return {
+    tag = "_surface",
+    setup = function(ctx, object)
+        local gui = object:FindFirstAncestorOfClass("SurfaceGui")
+        if not gui then return end
+        gui.AlwaysOnTop = ctx:attr(object, "sfTop", false)
+        pcall(function() gui.MaxDistance = tonumber(ctx:attr(object, "sfDist", 0)) or 0 end)
+        pcall(function() gui.PixelsPerStud = math.max(1, object.AbsoluteSize.X / math.max(1, tonumber(ctx:attr(object, "sfStuds", 8)) or 8)) end)
+    end,
+}]========],
+    ["Swing"] = [========[return {
+    tag = "_swing",
+    setup = function(ctx, object)
+        ctx:on(object, "show", function()
+            local scale, base = ctx:scale(object), ctx:remember(object, "Rotation", "swingRotation") or object.Rotation
+            local angle, seconds = tonumber(ctx:attr(object, "swingAngle", 20)) or 20, tonumber(ctx:attr(object, "swingTime", 1.2)) or 1.2
+            scale.Scale = tonumber(ctx:attr(object, "swingFrom", .5)) or .5; object.Rotation = base + angle
+            ctx:tween(scale, seconds * .4, { Scale = 1 }, Enum.EasingStyle.Back)
+            ctx:tween(object, seconds, { Rotation = base }, Enum.EasingStyle.Elastic)
+        end)
+    end,
+}]========],
+    ["ThreeD"] = [========[local UserInputService = game:GetService("UserInputService")
+return {
+    tag = "_3d",
+    setup = function(ctx, object)
+        local base = object.Rotation
+        ctx.runService.RenderStepped:Connect(function()
+            if not object.Parent then return end
+            local mouse, center = UserInputService:GetMouseLocation(), object.AbsolutePosition + object.AbsoluteSize / 2
+            local dynamic = math.clamp((mouse.X - center.X) / math.max(1, object.AbsoluteSize.X), -.5, .5) * (tonumber(ctx:attr(object, "tiltMax", 8)) or 8)
+            object.Rotation = base + (tonumber(ctx:attr(object, "tiltY", 0)) or 0) * .12 + (tonumber(ctx:attr(object, "tiltX", 0)) or 0) * .06 + dynamic
+        end)
+    end,
+}]========],
+    ["Tilt"] = [========[return {
+    tag = "_tilt",
+    setup = function(ctx, object)
+        if ctx:has(object, "_3d") then return end
+        local base = object.Rotation
+        object.Rotation = base + (tonumber(ctx:attr(object, "tiltY", -14)) or -14) * .12 + (tonumber(ctx:attr(object, "tiltX", 6)) or 6) * .06
+    end,
+}]========],
+    ["Turn"] = [========[return {
+    tag = "_turn",
+    setup = function(ctx, button)
+        if not button:IsA("GuiButton") then return end
+        local base = button.Rotation
+        ctx:on(button, "enter", function() ctx:tween(button, ctx:attr(button, "turnTime", .14), { Rotation = base + (tonumber(ctx:attr(button, "turnAngle", -5)) or -5) }) end)
+        ctx:on(button, "leave", function() ctx:tween(button, ctx:attr(button, "turnTime", .14), { Rotation = base }) end)
+    end,
+}]========],
+    ["Up"] = [========[return {
+    tag = "_up",
+    setup = function(ctx, button)
+        if not button:IsA("GuiButton") then return end
+        local base = button.Position
+        ctx:on(button, "enter", function() ctx:tween(button, ctx:attr(button, "upTime", .12), { Position = base - UDim2.fromOffset(0, tonumber(ctx:attr(button, "upDist", 6)) or 6) }) end)
+        ctx:on(button, "leave", function() ctx:tween(button, ctx:attr(button, "upTime", .12), { Position = base }) end)
+    end,
+}]========],
+    ["Wiggle"] = [========[return {
+    tag = "_wiggle",
+    setup = function(ctx, object)
+        task.spawn(function()
+            local base = object.Rotation
+            while object.Parent do
+                local angle, started = tonumber(ctx:attr(object, "wiggleAngle", 12)) or 12, time()
+                while object.Parent and time() - started < .65 do
+                    local elapsed = time() - started
+                    object.Rotation = base + math.sin(elapsed * math.pi * 8) * angle * (1 - elapsed / .65)
+                    ctx.runService.RenderStepped:Wait()
+                end
+                if object.Parent then object.Rotation = base end
+                task.wait(math.max(0, (tonumber(ctx:attr(object, "wiggleEvery", 4)) or 4) - .65))
+            end
+        end)
+    end,
+}]========],
+}
+local effects = { { ["tag"] = "_button", ["controls"] = { { ["key"] = "hoverDim", ["label"] = "Hover darken", ["min"] = 0.4, ["max"] = 1, ["step"] = 0.01, ["defaultValue"] = 0.8, ["kind"] = "range" }, { ["key"] = "pressDim", ["label"] = "Press darken", ["min"] = 0.3, ["max"] = 1, ["step"] = 0.01, ["defaultValue"] = 0.62, ["kind"] = "range" }, { ["key"] = "pressScale", ["label"] = "Press-in scale", ["min"] = 0.9, ["max"] = 1, ["step"] = 0.005, ["defaultValue"] = 0.985, ["kind"] = "range" }, { ["key"] = "hoverSound", ["label"] = "Hover sound ID", ["defaultValue"] = "", ["kind"] = "text" }, { ["key"] = "clickSound", ["label"] = "Click sound ID", ["defaultValue"] = "", ["kind"] = "text" } }, ["description"] = "Clickable frame with hover and press feedback." }, { ["tag"] = "_smooth", ["controls"] = { { ["key"] = "hoverScale", ["label"] = "Hover scale", ["min"] = 1, ["max"] = 1.3, ["step"] = 0.01, ["defaultValue"] = 1.08, ["kind"] = "range" }, { ["key"] = "pressScale", ["label"] = "Press scale", ["min"] = 0.7, ["max"] = 1, ["step"] = 0.01, ["defaultValue"] = 0.9, ["kind"] = "range" }, { ["key"] = "hoverSound", ["label"] = "Hover sound ID", ["defaultValue"] = "", ["kind"] = "text" }, { ["key"] = "clickSound", ["label"] = "Click sound ID", ["defaultValue"] = "", ["kind"] = "text" } }, ["description"] = "Tweened hover and press scaling with optional sounds." }, { ["tag"] = "_up", ["controls"] = { { ["key"] = "upDist", ["label"] = "Lift on hover (px)", ["min"] = 1, ["max"] = 100, ["step"] = 1, ["defaultValue"] = 6, ["kind"] = "range" }, { ["key"] = "upTime", ["label"] = "Lift time (s)", ["min"] = 0.02, ["max"] = 0.6, ["step"] = 0.01, ["defaultValue"] = 0.12, ["kind"] = "range" } }, ["description"] = "Lifts the element while hovered." }, { ["tag"] = "_turn", ["controls"] = { { ["key"] = "turnAngle", ["label"] = "Turn on hover (°)", ["min"] = -180, ["max"] = 180, ["step"] = 1, ["defaultValue"] = -5, ["kind"] = "angle" }, { ["key"] = "turnTime", ["label"] = "Turn time (s)", ["min"] = 0.02, ["max"] = 1, ["step"] = 0.01, ["defaultValue"] = 0.14, ["kind"] = "range" } }, ["description"] = "Rotates on hover and settles on leave." }, { ["tag"] = "_squish", ["controls"] = { { ["key"] = "squishAmp", ["label"] = "Squash (%)", ["min"] = 1, ["max"] = 30, ["step"] = 1, ["defaultValue"] = 10, ["kind"] = "range" }, { ["key"] = "squishTime", ["label"] = "Return time (s)", ["min"] = 0.05, ["max"] = 0.6, ["step"] = 0.01, ["defaultValue"] = 0.18, ["kind"] = "range" } }, ["description"] = "Squash-and-stretch press response." }, { ["tag"] = "_ripple", ["controls"] = { { ["key"] = "rippleColor", ["label"] = "Ripple colour", ["defaultValue"] = "#ffffff", ["kind"] = "color" }, { ["key"] = "rippleOp", ["label"] = "Opacity", ["min"] = 0.1, ["max"] = 1, ["step"] = 0.05, ["defaultValue"] = 0.4, ["kind"] = "range" }, { ["key"] = "rippleTime", ["label"] = "Expand time (s)", ["min"] = 0.15, ["max"] = 1.5, ["step"] = 0.05, ["defaultValue"] = 0.45, ["kind"] = "range" } }, ["description"] = "Click wave that expands from the pointer." }, { ["tag"] = "_magnet", ["controls"] = { { ["key"] = "magnetPull", ["label"] = "Pull strength", ["min"] = 0.05, ["max"] = 0.8, ["step"] = 0.01, ["defaultValue"] = 0.35, ["kind"] = "range" }, { ["key"] = "magnetRadius", ["label"] = "Attraction radius (px)", ["min"] = 10, ["max"] = 200, ["step"] = 5, ["defaultValue"] = 60, ["kind"] = "range" } }, ["description"] = "Pulls the button toward a nearby cursor." }, { ["tag"] = "_select", ["controls"] = { { ["key"] = "selectColor", ["label"] = "Selected colour", ["defaultValue"] = "#4ade80", ["kind"] = "color" }, { ["key"] = "selectWidth", ["label"] = "Outline thickness (px)", ["min"] = 1, ["max"] = 12, ["step"] = 0.5, ["defaultValue"] = 3, ["kind"] = "range" }, { ["key"] = "selectPop", ["label"] = "Pop on select", ["min"] = 1, ["max"] = 1.2, ["step"] = 0.01, ["defaultValue"] = 1.06, ["kind"] = "range" }, { ["key"] = "selectTime", ["label"] = "Animation time (s)", ["min"] = 0, ["max"] = 0.8, ["step"] = 0.01, ["defaultValue"] = 0.18, ["kind"] = "range" } }, ["description"] = "Exclusive selectable-card outline and pop state." }, { ["tag"] = "_color", ["controls"] = { { ["key"] = "colorPick", ["label"] = "Hover colour (-1 = none)", ["defaultValue"] = "-1", ["kind"] = "color" }, { ["key"] = "colorPick2", ["label"] = "Second colour (-1 = solid)", ["defaultValue"] = "-1", ["kind"] = "color" }, { ["key"] = "colorAngle", ["label"] = "Gradient angle (°)", ["min"] = 0, ["max"] = 359, ["step"] = 1, ["defaultValue"] = 0, ["kind"] = "angle" }, { ["key"] = "colorIn", ["label"] = "Fade in (s)", ["min"] = 0.05, ["max"] = 2, ["step"] = 0.01, ["defaultValue"] = 0.14, ["kind"] = "range" }, { ["key"] = "colorOut", ["label"] = "Fade out (s)", ["min"] = 0.05, ["max"] = 2, ["step"] = 0.01, ["defaultValue"] = 0.25, ["kind"] = "range" } }, ["description"] = "Hover recolour or two-colour gradient with separate fades." }, { ["tag"] = "_glint", ["controls"] = { { ["key"] = "glintSpeed", ["label"] = "Hover shine speed", ["min"] = 0.2, ["max"] = 4, ["step"] = 0.05, ["defaultValue"] = 1.8, ["kind"] = "range" } }, ["description"] = "Runs a drawn shine once on hover." }, { ["tag"] = "_burst", ["controls"] = { { ["key"] = "burstImg", ["label"] = "Particle image asset ID", ["defaultValue"] = "", ["kind"] = "text" }, { ["key"] = "burstCount", ["label"] = "How many", ["min"] = 1, ["max"] = 60, ["step"] = 1, ["defaultValue"] = 12, ["kind"] = "range" }, { ["key"] = "burstRandom", ["label"] = "Where they come from", ["defaultValue"] = 0, ["kind"] = "select", ["options"] = { { ["label"] = "Centre, evenly around", ["value"] = 0 }, { ["label"] = "Random edge points", ["value"] = 1 } } }, { ["key"] = "burstTime", ["label"] = "Seconds in the air", ["min"] = 0.2, ["max"] = 2, ["step"] = 0.05, ["defaultValue"] = 0.6, ["kind"] = "range" }, { ["key"] = "burstDist", ["label"] = "Reach (button heights)", ["min"] = 0.1, ["max"] = 3, ["step"] = 0.05, ["defaultValue"] = 0.6, ["kind"] = "range" }, { ["key"] = "burstAlpha", ["label"] = "Transparency at start", ["min"] = 0, ["max"] = 0.9, ["step"] = 0.05, ["defaultValue"] = 0, ["kind"] = "range" }, { ["key"] = "burstSize", ["label"] = "Smallest particle (px)", ["min"] = 2, ["max"] = 120, ["step"] = 1, ["defaultValue"] = 12, ["kind"] = "range" }, { ["key"] = "burstSizeMax", ["label"] = "Largest particle (px)", ["min"] = 2, ["max"] = 120, ["step"] = 1, ["defaultValue"] = 12, ["kind"] = "range" }, { ["key"] = "burstShrink", ["label"] = "Shrink as they fade", ["defaultValue"] = true, ["kind"] = "toggle" }, { ["key"] = "burstSpin", ["label"] = "Spin", ["defaultValue"] = false, ["kind"] = "toggle" }, { ["key"] = "burstSpinSpeed", ["label"] = "Spin speed (°/s)", ["min"] = 10, ["max"] = 1080, ["step"] = 10, ["defaultValue"] = 360, ["kind"] = "range" }, { ["key"] = "burstColor", ["label"] = "Colour", ["defaultValue"] = "#ffffff", ["kind"] = "color" } }, ["description"] = "Emits configurable circle or image particles when clicked." }, { ["tag"] = "_pointer", ["controls"] = { { ["key"] = "pointerSide", ["label"] = "Side", ["defaultValue"] = 0, ["kind"] = "select", ["options"] = { { ["label"] = "As drawn", ["value"] = 0 }, { ["label"] = "Left", ["value"] = 1 }, { ["label"] = "Right", ["value"] = 2 }, { ["label"] = "Top", ["value"] = 3 }, { ["label"] = "Bottom", ["value"] = 4 } } }, { ["key"] = "pointerNudge", ["label"] = "Extra distance (px)", ["min"] = -40, ["max"] = 80, ["step"] = 1, ["defaultValue"] = 0, ["kind"] = "range" }, { ["key"] = "pointerTurn", ["label"] = "Turn toward button", ["defaultValue"] = true, ["kind"] = "toggle" }, { ["key"] = "pointerIn", ["label"] = "Appears", ["defaultValue"] = 0, ["kind"] = "select", ["options"] = { { ["label"] = "Pop", ["value"] = 0 }, { ["label"] = "Fade", ["value"] = 1 }, { ["label"] = "Slide", ["value"] = 2 } } }, { ["key"] = "pointerSpeed", ["label"] = "Crawl speed", ["min"] = 1, ["max"] = 12, ["step"] = 0.5, ["defaultValue"] = 5, ["kind"] = "range" }, { ["key"] = "pointerBounce", ["label"] = "Bounce", ["min"] = 0, ["max"] = 0.6, ["step"] = 0.05, ["defaultValue"] = 0.25, ["kind"] = "range" }, { ["key"] = "pointerPress", ["label"] = "Press poke (px)", ["min"] = 0, ["max"] = 30, ["step"] = 1, ["defaultValue"] = 10, ["kind"] = "range" }, { ["key"] = "pointerHold", ["label"] = "Linger (s)", ["min"] = 0, ["max"] = 2, ["step"] = 0.05, ["defaultValue"] = 0.5, ["kind"] = "range" }, { ["key"] = "pointerBob", ["label"] = "Breathing", ["defaultValue"] = true, ["kind"] = "toggle" }, { ["key"] = "pointerBobAmp", ["label"] = "Breathing strength (px)", ["min"] = 1, ["max"] = 16, ["step"] = 0.5, ["defaultValue"] = 4, ["kind"] = "range" }, { ["key"] = "pointerPad", ["label"] = "Follow gamepad selection", ["defaultValue"] = true, ["kind"] = "toggle" } }, ["description"] = "Shared animated menu pointer for mouse, touch, and gamepad." }, { ["tag"] = "_card", ["controls"] = { { ["key"] = "cardCorner", ["label"] = "Card anchor", ["defaultValue"] = 6, ["kind"] = "select", ["options"] = { { ["label"] = "Top-left", ["value"] = 0 }, { ["label"] = "Top", ["value"] = 1 }, { ["label"] = "Top-right", ["value"] = 2 }, { ["label"] = "Left", ["value"] = 3 }, { ["label"] = "Center", ["value"] = 4 }, { ["label"] = "Right", ["value"] = 5 }, { ["label"] = "Bottom-left", ["value"] = 6 }, { ["label"] = "Bottom", ["value"] = 7 }, { ["label"] = "Bottom-right", ["value"] = 8 } } }, { ["key"] = "cardPoint", ["label"] = "Button anchor", ["defaultValue"] = 4, ["kind"] = "select", ["options"] = { { ["label"] = "Top-left", ["value"] = 0 }, { ["label"] = "Top", ["value"] = 1 }, { ["label"] = "Top-right", ["value"] = 2 }, { ["label"] = "Left", ["value"] = 3 }, { ["label"] = "Center", ["value"] = 4 }, { ["label"] = "Right", ["value"] = 5 }, { ["label"] = "Bottom-left", ["value"] = 6 }, { ["label"] = "Bottom", ["value"] = 7 }, { ["label"] = "Bottom-right", ["value"] = 8 } } }, { ["key"] = "cardX", ["label"] = "Offset X (px)", ["min"] = -200, ["max"] = 200, ["step"] = 1, ["defaultValue"] = 0, ["kind"] = "range" }, { ["key"] = "cardY", ["label"] = "Offset Y (px)", ["min"] = -200, ["max"] = 200, ["step"] = 1, ["defaultValue"] = 0, ["kind"] = "range" }, { ["key"] = "cardIn", ["label"] = "Appears", ["defaultValue"] = 0, ["kind"] = "select", ["options"] = { { ["label"] = "Out of the button", ["value"] = 0 }, { ["label"] = "Pop", ["value"] = 1 }, { ["label"] = "Fade", ["value"] = 2 } } }, { ["key"] = "cardTime", ["label"] = "Appear time (s)", ["min"] = 0.05, ["max"] = 0.6, ["step"] = 0.01, ["defaultValue"] = 0.16, ["kind"] = "range" }, { ["key"] = "cardDelay", ["label"] = "Show delay (s)", ["min"] = 0, ["max"] = 1.5, ["step"] = 0.05, ["defaultValue"] = 0.25, ["kind"] = "range" }, { ["key"] = "cardHide", ["label"] = "Hide delay (s)", ["min"] = 0, ["max"] = 1.5, ["step"] = 0.05, ["defaultValue"] = 0.15, ["kind"] = "range" }, { ["key"] = "cardFlip", ["label"] = "Keep on screen", ["defaultValue"] = true, ["kind"] = "toggle" }, { ["key"] = "cardSticky", ["label"] = "Keep open while hovered", ["defaultValue"] = true, ["kind"] = "toggle" }, { ["key"] = "cardTurn", ["label"] = "Turn over on click", ["defaultValue"] = false, ["kind"] = "toggle" }, { ["key"] = "cardTurnTime", ["label"] = "Turn time (s)", ["min"] = 0.15, ["max"] = 1.2, ["step"] = 0.05, ["defaultValue"] = 0.4, ["kind"] = "range" } }, ["description"] = "Shows a configurable hover card beside its owning button." }, { ["tag"] = "_lean", ["controls"] = { { ["key"] = "leanAngle", ["label"] = "Lean on card hover (°)", ["min"] = -180, ["max"] = 180, ["step"] = 1, ["defaultValue"] = -8, ["kind"] = "angle" }, { ["key"] = "leanTime", ["label"] = "Lean time (s)", ["min"] = 0.02, ["max"] = 1, ["step"] = 0.01, ["defaultValue"] = 0.14, ["kind"] = "range" } }, ["description"] = "Tilts a child when its surrounding card is hovered." }, { ["tag"] = "_pop", ["controls"] = { { ["key"] = "popFrom", ["label"] = "Start scale", ["min"] = 0.3, ["max"] = 1, ["step"] = 0.01, ["defaultValue"] = 0.8, ["kind"] = "range" }, { ["key"] = "popTime", ["label"] = "Pop time (s)", ["min"] = 0.05, ["max"] = 1, ["step"] = 0.01, ["defaultValue"] = 0.3, ["kind"] = "range" } }, ["description"] = "Spring-scale entrance that replays when shown." }, { ["tag"] = "_fadein", ["controls"] = { { ["key"] = "fadeinTime", ["label"] = "Fade time (s)", ["min"] = 0.05, ["max"] = 5, ["step"] = 0.05, ["defaultValue"] = 0.35, ["kind"] = "range" }, { ["key"] = "fadeinDelay", ["label"] = "Start delay (s)", ["min"] = 0, ["max"] = 10, ["step"] = 0.1, ["defaultValue"] = 0, ["kind"] = "range" } }, ["description"] = "Delayed transparency entrance that replays when shown." }, { ["tag"] = "_drop", ["controls"] = { { ["key"] = "dropHeight", ["label"] = "Fall height (px)", ["min"] = 20, ["max"] = 600, ["step"] = 5, ["defaultValue"] = 160, ["kind"] = "range" }, { ["key"] = "dropTime", ["label"] = "Fall time (s)", ["min"] = 0.2, ["max"] = 2, ["step"] = 0.05, ["defaultValue"] = 0.6, ["kind"] = "range" }, { ["key"] = "dropBounce", ["label"] = "Bounce (%)", ["min"] = 0, ["max"] = 40, ["step"] = 1, ["defaultValue"] = 12, ["kind"] = "range" }, { ["key"] = "dropSquash", ["label"] = "Squash (%)", ["min"] = 0, ["max"] = 25, ["step"] = 1, ["defaultValue"] = 10, ["kind"] = "range" }, { ["key"] = "dropFade", ["label"] = "Fade while falling", ["defaultValue"] = true, ["kind"] = "toggle" }, { ["key"] = "dropDelay", ["label"] = "Delay (s)", ["min"] = 0, ["max"] = 3, ["step"] = 0.05, ["defaultValue"] = 0, ["kind"] = "range" }, { ["key"] = "dropKids", ["label"] = "Children one after another", ["defaultValue"] = false, ["kind"] = "toggle" }, { ["key"] = "dropStep", ["label"] = "Step between children (s)", ["min"] = 0.02, ["max"] = 0.4, ["step"] = 0.01, ["defaultValue"] = 0.06, ["kind"] = "range" }, { ["key"] = "dropSound", ["label"] = "Landing sound ID", ["defaultValue"] = "", ["kind"] = "text" } }, ["description"] = "Weighted falling entrance with bounce, squash, stagger, and sound." }, { ["tag"] = "_reveal", ["controls"] = { { ["key"] = "revealAngle", ["label"] = "Swing angle (°)", ["min"] = 5, ["max"] = 80, ["step"] = 1, ["defaultValue"] = 35, ["kind"] = "range" }, { ["key"] = "revealTime", ["label"] = "Settle time (s)", ["min"] = 0.2, ["max"] = 2, ["step"] = 0.05, ["defaultValue"] = 0.7, ["kind"] = "range" }, { ["key"] = "revealDir", ["label"] = "Swing direction", ["min"] = 0, ["max"] = 359, ["step"] = 1, ["defaultValue"] = 0, ["kind"] = "angle" }, { ["key"] = "revealFrom", ["label"] = "Start scale", ["min"] = 0.2, ["max"] = 1, ["step"] = 0.01, ["defaultValue"] = 0.55, ["kind"] = "range" } }, ["description"] = "Rocking perspective-style showcase entrance." }, { ["tag"] = "_swing", ["controls"] = { { ["key"] = "swingAngle", ["label"] = "Rock angle (°)", ["min"] = 5, ["max"] = 60, ["step"] = 1, ["defaultValue"] = 20, ["kind"] = "range" }, { ["key"] = "swingCount", ["label"] = "Rocks before settling", ["min"] = 1, ["max"] = 8, ["step"] = 1, ["defaultValue"] = 4, ["kind"] = "range" }, { ["key"] = "swingTime", ["label"] = "Settle time (s)", ["min"] = 0.3, ["max"] = 3, ["step"] = 0.05, ["defaultValue"] = 1.2, ["kind"] = "range" }, { ["key"] = "swingFrom", ["label"] = "Start scale", ["min"] = 0.2, ["max"] = 1, ["step"] = 0.01, ["defaultValue"] = 0.5, ["kind"] = "range" } }, ["description"] = "Decaying door-like 3D rocking entrance." }, { ["tag"] = "_cascade", ["controls"] = { { ["key"] = "cascadeGap", ["label"] = "Delay between items (ms)", ["min"] = 10, ["max"] = 400, ["step"] = 10, ["defaultValue"] = 70, ["kind"] = "range" } }, ["description"] = "Staggers child entrances from top to bottom." }, { ["tag"] = "_spin", ["controls"] = { { ["key"] = "spinSpeed", ["label"] = "Spin speed (°/s)", ["min"] = -720, ["max"] = 720, ["step"] = 5, ["defaultValue"] = 120, ["kind"] = "range" } }, ["description"] = "Continuously rotates around the element centre." }, { ["tag"] = "_rays", ["controls"] = { { ["key"] = "raysSpeed", ["label"] = "Spin speed (°/s)", ["min"] = -360, ["max"] = 360, ["step"] = 5, ["defaultValue"] = 25, ["kind"] = "range" }, { ["key"] = "raysPulse", ["label"] = "Pulse (%)", ["min"] = 0, ["max"] = 30, ["step"] = 1, ["defaultValue"] = 6, ["kind"] = "range" } }, ["description"] = "Slow spin plus a gentle prize-backdrop pulse." }, { ["tag"] = "_pulse", ["controls"] = { { ["key"] = "pulseAmp", ["label"] = "Beat strength (%)", ["min"] = 0.5, ["max"] = 25, ["step"] = 0.5, ["defaultValue"] = 5, ["kind"] = "range" }, { ["key"] = "pulseSpeed", ["label"] = "Beats per second", ["min"] = 0.2, ["max"] = 4, ["step"] = 0.05, ["defaultValue"] = 1, ["kind"] = "range" } }, ["description"] = "Rhythmic scale beat." }, { ["tag"] = "_float", ["controls"] = { { ["key"] = "floatDist", ["label"] = "Travel (px)", ["min"] = 1, ["max"] = 60, ["step"] = 1, ["defaultValue"] = 8, ["kind"] = "range" }, { ["key"] = "floatSpeed", ["label"] = "Speed (cycles/s)", ["min"] = 0.05, ["max"] = 3, ["step"] = 0.05, ["defaultValue"] = 0.6, ["kind"] = "range" }, { ["key"] = "floatAngle", ["label"] = "Direction", ["min"] = 0, ["max"] = 359, ["step"] = 1, ["defaultValue"] = 0, ["kind"] = "angle" } }, ["description"] = "Continuous directional back-and-forth drift." }, { ["tag"] = "_jelly", ["controls"] = { { ["key"] = "jellyAmp", ["label"] = "Wobble (°)", ["min"] = 0.5, ["max"] = 15, ["step"] = 0.5, ["defaultValue"] = 3, ["kind"] = "range" }, { ["key"] = "jellySpeed", ["label"] = "Speed", ["min"] = 0.2, ["max"] = 4, ["step"] = 0.05, ["defaultValue"] = 1.2, ["kind"] = "range" } }, ["description"] = "Randomised idle rotation and breathing wobble." }, { ["tag"] = "_blink", ["controls"] = { { ["key"] = "blinkOn", ["label"] = "Visible for (s)", ["min"] = 0.1, ["max"] = 10, ["step"] = 0.1, ["defaultValue"] = 1.2, ["kind"] = "range" }, { ["key"] = "blinkOff", ["label"] = "Hidden for (s)", ["min"] = 0.1, ["max"] = 10, ["step"] = 0.1, ["defaultValue"] = 0.8, ["kind"] = "range" }, { ["key"] = "blinkFade", ["label"] = "Fade time (s)", ["min"] = 0, ["max"] = 2, ["step"] = 0.05, ["defaultValue"] = 0.25, ["kind"] = "range" }, { ["key"] = "blinkDelay", ["label"] = "Start delay (s)", ["min"] = 0, ["max"] = 10, ["step"] = 0.1, ["defaultValue"] = 0, ["kind"] = "range" } }, ["description"] = "Repeating visible and hidden cycle with fades." }, { ["tag"] = "_shake", ["controls"] = { { ["key"] = "shakeAmp", ["label"] = "Shake distance (px)", ["min"] = 1, ["max"] = 40, ["step"] = 1, ["defaultValue"] = 6, ["kind"] = "range" }, { ["key"] = "shakeTime", ["label"] = "Burst length (s)", ["min"] = 0.1, ["max"] = 2, ["step"] = 0.05, ["defaultValue"] = 0.5, ["kind"] = "range" }, { ["key"] = "shakeEvery", ["label"] = "Repeat every (s)", ["min"] = 0.5, ["max"] = 30, ["step"] = 0.5, ["defaultValue"] = 3, ["kind"] = "range" } }, ["description"] = "Repeating burst of decaying positional shake." }, { ["tag"] = "_wiggle", ["controls"] = { { ["key"] = "wiggleAngle", ["label"] = "Swing angle (°)", ["min"] = 1, ["max"] = 45, ["step"] = 1, ["defaultValue"] = 12, ["kind"] = "range" }, { ["key"] = "wiggleEvery", ["label"] = "Repeat every (s)", ["min"] = 0.5, ["max"] = 30, ["step"] = 0.5, ["defaultValue"] = 4, ["kind"] = "range" } }, ["description"] = "Repeating decaying rotational ring." }, { ["tag"] = "_glow", ["controls"] = { { ["key"] = "glowSize", ["label"] = "Glow size (px)", ["min"] = 1, ["max"] = 40, ["step"] = 1, ["defaultValue"] = 12, ["kind"] = "range" }, { ["key"] = "glowSpeed", ["label"] = "Breathe speed", ["min"] = 0.2, ["max"] = 4, ["step"] = 0.05, ["defaultValue"] = 0.8, ["kind"] = "range" }, { ["key"] = "glowColor", ["label"] = "Glow colour", ["defaultValue"] = "#ffffff", ["kind"] = "color" } }, ["description"] = "Breathing outline or halo." }, { ["tag"] = "_pixels", ["controls"] = { { ["key"] = "pixCell", ["label"] = "Cell size (px)", ["min"] = 1, ["max"] = 64, ["step"] = 1, ["defaultValue"] = 14, ["kind"] = "range" }, { ["key"] = "pixVary", ["label"] = "Random cell sizes", ["defaultValue"] = false, ["kind"] = "toggle" }, { ["key"] = "pixRate", ["label"] = "Twinkles per second", ["min"] = 0.5, ["max"] = 60, ["step"] = 0.5, ["defaultValue"] = 8, ["kind"] = "range" }, { ["key"] = "pixColor", ["label"] = "Accent colour", ["defaultValue"] = "#ffffff", ["kind"] = "color" }, { ["key"] = "pixAlpha", ["label"] = "Max opacity", ["min"] = 0.1, ["max"] = 1, ["step"] = 0.05, ["defaultValue"] = 0.35, ["kind"] = "range" } }, ["description"] = "Random mosaic cells that light and fade." }, { ["tag"] = "_shiny", ["controls"] = { { ["key"] = "shineSpeed", ["label"] = "Shine speed", ["min"] = 0.1, ["max"] = 4, ["step"] = 0.05, ["defaultValue"] = 1.2, ["kind"] = "range" }, { ["key"] = "shineCooldown", ["label"] = "Pause between sweeps (s)", ["min"] = 0, ["max"] = 8, ["step"] = 0.1, ["defaultValue"] = 2, ["kind"] = "range" } }, ["description"] = "Loops a drawn shine across its parent." }, { ["tag"] = "_gleam", ["controls"] = { { ["key"] = "gleamSpeed", ["label"] = "Sweep time (s)", ["min"] = 0.2, ["max"] = 3, ["step"] = 0.05, ["defaultValue"] = 0.8, ["kind"] = "range" }, { ["key"] = "gleamCooldown", ["label"] = "Pause between sweeps (s)", ["min"] = 0, ["max"] = 10, ["step"] = 0.5, ["defaultValue"] = 2, ["kind"] = "range" }, { ["key"] = "gleamWidth", ["label"] = "Wave width", ["min"] = 0.05, ["max"] = 0.6, ["step"] = 0.01, ["defaultValue"] = 0.22, ["kind"] = "range" } }, ["description"] = "Sweeps a bright wave across text fill and outline." }, { ["tag"] = "_stroke", ["controls"] = { { ["key"] = "strokeMode", ["label"] = "Animation", ["defaultValue"] = 0, ["kind"] = "select", ["options"] = { { ["label"] = "Rotation", ["value"] = 0 }, { ["label"] = "Offset", ["value"] = 1 } } }, { ["key"] = "strokeAngle", ["label"] = "Gradient angle (°)", ["min"] = -360, ["max"] = 360, ["step"] = 1, ["defaultValue"] = 0, ["kind"] = "angle" }, { ["key"] = "strokeRotate", ["label"] = "Rotation (°/s)", ["min"] = -360, ["max"] = 360, ["step"] = 1, ["defaultValue"] = 45, ["kind"] = "range" }, { ["key"] = "strokeDirection", ["label"] = "Travel direction (°)", ["min"] = -360, ["max"] = 360, ["step"] = 1, ["defaultValue"] = 0, ["kind"] = "angle" }, { ["key"] = "strokeSpeed", ["label"] = "Cycles per second", ["min"] = 0, ["max"] = 4, ["step"] = 0.05, ["defaultValue"] = 0.35, ["kind"] = "range" }, { ["key"] = "strokeStretch", ["label"] = "Stretch", ["min"] = 0.5, ["max"] = 4, ["step"] = 0.05, ["defaultValue"] = 1, ["kind"] = "range" }, { ["key"] = "strokeOffsetX", ["label"] = "Start offset X", ["min"] = -2, ["max"] = 2, ["step"] = 0.05, ["defaultValue"] = 0, ["kind"] = "range" }, { ["key"] = "strokeOffsetY", ["label"] = "Start offset Y", ["min"] = -2, ["max"] = 2, ["step"] = 0.05, ["defaultValue"] = 0, ["kind"] = "range" }, { ["key"] = "strokePhase", ["label"] = "Start phase", ["min"] = 0, ["max"] = 1, ["step"] = 0.01, ["defaultValue"] = 0, ["kind"] = "range" } }, ["description"] = "Animates an existing outline gradient by rotation or offset." }, { ["tag"] = "_flow", ["controls"] = { { ["key"] = "flowMove", ["label"] = "Animation", ["defaultValue"] = 0, ["kind"] = "select", ["options"] = { { ["label"] = "Offset", ["value"] = 0 }, { ["label"] = "Rotation", ["value"] = 1 } } }, { ["key"] = "flowAngle", ["label"] = "Gradient angle (°)", ["min"] = -360, ["max"] = 360, ["step"] = 1, ["defaultValue"] = 0, ["kind"] = "angle" }, { ["key"] = "flowRotate", ["label"] = "Rotation (°/s)", ["min"] = -3600, ["max"] = 3600, ["step"] = 1, ["defaultValue"] = 180, ["kind"] = "range" }, { ["key"] = "flowDirection", ["label"] = "Travel direction (°)", ["min"] = -360, ["max"] = 360, ["step"] = 1, ["defaultValue"] = 0, ["kind"] = "angle" }, { ["key"] = "flowSpeed", ["label"] = "Cycles per second", ["min"] = 0, ["max"] = 4, ["step"] = 0.05, ["defaultValue"] = 0.5, ["kind"] = "range" }, { ["key"] = "flowStretch", ["label"] = "Stretch", ["min"] = 0.5, ["max"] = 4, ["step"] = 0.05, ["defaultValue"] = 1, ["kind"] = "range" }, { ["key"] = "flowOffsetX", ["label"] = "Start offset X", ["min"] = -2, ["max"] = 2, ["step"] = 0.05, ["defaultValue"] = 0, ["kind"] = "range" }, { ["key"] = "flowOffsetY", ["label"] = "Start offset Y", ["min"] = -2, ["max"] = 2, ["step"] = 0.05, ["defaultValue"] = 0, ["kind"] = "range" }, { ["key"] = "flowPhase", ["label"] = "Start phase", ["min"] = 0, ["max"] = 1, ["step"] = 0.01, ["defaultValue"] = 0, ["kind"] = "range" }, { ["key"] = "flowOn", ["label"] = "Applies to", ["defaultValue"] = 0, ["kind"] = "select", ["options"] = { { ["label"] = "Fill", ["value"] = 0 }, { ["label"] = "Stroke", ["value"] = 1 }, { ["label"] = "Both", ["value"] = 2 } } }, { ["key"] = "flowMode", ["label"] = "Colours", ["defaultValue"] = 0, ["kind"] = "select", ["options"] = { { ["label"] = "Layer colors", ["value"] = 0 }, { ["label"] = "Rainbow", ["value"] = 1 } } } }, ["description"] = "Animates fill and/or outline gradients by rotation or offset." }, { ["tag"] = "_drift", ["controls"] = { { ["key"] = "driftSpeed", ["label"] = "Drift speed (px/s)", ["min"] = 0, ["max"] = 400, ["step"] = 5, ["defaultValue"] = 40, ["kind"] = "range" }, { ["key"] = "driftAngle", ["label"] = "Drift direction", ["min"] = 0, ["max"] = 359, ["step"] = 1, ["defaultValue"] = 270, ["kind"] = "angle" } }, ["description"] = "Slides a tiled texture continuously." }, { ["tag"] = "_fall", ["controls"] = { { ["key"] = "fallImg", ["label"] = "Image asset IDs (up to 4)", ["defaultValue"] = "", ["kind"] = "text" }, { ["key"] = "fallCount", ["label"] = "How many", ["min"] = 1, ["max"] = 60, ["step"] = 1, ["defaultValue"] = 12, ["kind"] = "range" }, { ["key"] = "fallTime", ["label"] = "Seconds to cross", ["min"] = 0.5, ["max"] = 30, ["step"] = 0.5, ["defaultValue"] = 6, ["kind"] = "range" }, { ["key"] = "fallAlpha", ["label"] = "Fade", ["min"] = 0, ["max"] = 1, ["step"] = 0.05, ["defaultValue"] = 0.75, ["kind"] = "range" }, { ["key"] = "fallScale", ["label"] = "Smallest copy", ["min"] = 0.15, ["max"] = 2, ["step"] = 0.05, ["defaultValue"] = 0.6, ["kind"] = "range" }, { ["key"] = "fallScaleMax", ["label"] = "Largest copy", ["min"] = 0.15, ["max"] = 2, ["step"] = 0.05, ["defaultValue"] = 1, ["kind"] = "range" }, { ["key"] = "fallTilt", ["label"] = "Tilt spread (°)", ["min"] = 0, ["max"] = 180, ["step"] = 5, ["defaultValue"] = 40, ["kind"] = "range" }, { ["key"] = "fallSpread", ["label"] = "Keep apart", ["defaultValue"] = false, ["kind"] = "toggle" }, { ["key"] = "fallGap", ["label"] = "Distance (copy widths)", ["min"] = 0.2, ["max"] = 3, ["step"] = 0.1, ["defaultValue"] = 1, ["kind"] = "range" }, { ["key"] = "fallSpin", ["label"] = "Spin while falling", ["defaultValue"] = false, ["kind"] = "toggle" }, { ["key"] = "fallSpinSpeed", ["label"] = "Spin speed (°/s)", ["min"] = 10, ["max"] = 720, ["step"] = 10, ["defaultValue"] = 90, ["kind"] = "range" } }, ["description"] = "Rains up to four configured images through the element." }, { ["tag"] = "_3d", ["controls"] = { { ["key"] = "tiltMax", ["label"] = "Tilt strength (°)", ["min"] = 0, ["max"] = 25, ["step"] = 0.5, ["defaultValue"] = 8, ["kind"] = "range" } }, ["description"] = "Cursor-driven perspective tilt." }, { ["tag"] = "_tilt", ["controls"] = { { ["key"] = "tiltY", ["label"] = "Turn left / right (°)", ["min"] = -180, ["max"] = 180, ["step"] = 1, ["defaultValue"] = -14, ["kind"] = "angle" }, { ["key"] = "tiltX", ["label"] = "Look up / down (°)", ["min"] = -180, ["max"] = 180, ["step"] = 1, ["defaultValue"] = 6, ["kind"] = "angle" }, { ["key"] = "tiltPersp", ["label"] = "Perspective", ["min"] = 1, ["max"] = 10, ["step"] = 0.1, ["defaultValue"] = 4, ["kind"] = "range" } }, ["description"] = "Holds a static perspective pose on two axes." }, { ["tag"] = "_billboard", ["controls"] = { { ["key"] = "bbStuds", ["label"] = "Width in studs", ["min"] = 1, ["max"] = 50, ["step"] = 0.5, ["defaultValue"] = 8, ["kind"] = "range" }, { ["key"] = "bbTop", ["label"] = "Through walls", ["defaultValue"] = true, ["kind"] = "toggle" }, { ["key"] = "bbDist", ["label"] = "Max distance (0 = ∞)", ["min"] = 0, ["max"] = 500, ["step"] = 5, ["defaultValue"] = 0, ["kind"] = "range" }, { ["key"] = "bbClick", ["label"] = "Lives in", ["defaultValue"] = 0, ["kind"] = "select", ["options"] = { { ["label"] = "Part (self-contained)", ["value"] = 0 }, { ["label"] = "ScreenGui (interactive)", ["value"] = 1 } } } }, ["description"] = "World-space BillboardGui sizing, visibility, and interaction mode." }, { ["tag"] = "_surface", ["controls"] = { { ["key"] = "sfStuds", ["label"] = "Width in studs", ["min"] = 1, ["max"] = 50, ["step"] = 0.5, ["defaultValue"] = 8, ["kind"] = "range" }, { ["key"] = "sfTop", ["label"] = "Through walls", ["defaultValue"] = false, ["kind"] = "toggle" }, { ["key"] = "sfDist", ["label"] = "Max distance (0 = ∞)", ["min"] = 0, ["max"] = 500, ["step"] = 5, ["defaultValue"] = 0, ["kind"] = "range" } }, ["description"] = "SurfaceGui sizing and visibility controls." }, { ["tag"] = "_prompt", ["controls"] = { { ["key"] = "promptKey", ["label"] = "Key", ["defaultValue"] = "E", ["kind"] = "text" }, { ["key"] = "promptHold", ["label"] = "Hold time (s)", ["min"] = 0, ["max"] = 10, ["step"] = 0.1, ["defaultValue"] = 0.6, ["kind"] = "range" }, { ["key"] = "promptDist", ["label"] = "Show distance (studs)", ["min"] = 2, ["max"] = 100, ["step"] = 1, ["defaultValue"] = 10, ["kind"] = "range" } }, ["description"] = "Custom ProximityPrompt UI with key, hold, and distance settings." }, { ["tag"] = "_hold", ["controls"] = { { ["key"] = "holdColor", ["label"] = "Fill colour", ["defaultValue"] = "#22c55e", ["kind"] = "color" } }, ["description"] = "Fills a prompt stroke while the interaction key is held." }, { ["tag"] = "_focus", ["controls"] = { { ["key"] = "focusFov", ["label"] = "Camera push (°)", ["min"] = -40, ["max"] = 40, ["step"] = 1, ["defaultValue"] = -8, ["kind"] = "range" }, { ["key"] = "focusBlur", ["label"] = "Blur behind", ["min"] = 0, ["max"] = 56, ["step"] = 1, ["defaultValue"] = 18, ["kind"] = "range" }, { ["key"] = "focusDim", ["label"] = "Darken world", ["min"] = 0, ["max"] = 1, ["step"] = 0.05, ["defaultValue"] = 0, ["kind"] = "range" }, { ["key"] = "focusTime", ["label"] = "Seconds", ["min"] = 0.05, ["max"] = 5, ["step"] = 0.05, ["defaultValue"] = 0.35, ["kind"] = "range" } }, ["description"] = "Changes camera FOV, blur, and dim while a panel is open." }, { ["tag"] = "_shadow", ["controls"] = { { ["key"] = "shadowColor", ["label"] = "Colour", ["defaultValue"] = "#000000", ["kind"] = "color" }, { ["key"] = "shadowColor2", ["label"] = "Second colour (-1 = off)", ["defaultValue"] = "-1", ["kind"] = "color" }, { ["key"] = "shadowAlpha", ["label"] = "Strength", ["min"] = 0, ["max"] = 1, ["step"] = 0.01, ["defaultValue"] = 0.35, ["kind"] = "range" }, { ["key"] = "shadowX", ["label"] = "Offset X (px)", ["min"] = -200, ["max"] = 200, ["step"] = 1, ["defaultValue"] = 0, ["kind"] = "range" }, { ["key"] = "shadowY", ["label"] = "Offset Y (px)", ["min"] = -200, ["max"] = 200, ["step"] = 1, ["defaultValue"] = 8, ["kind"] = "range" }, { ["key"] = "shadowBlur", ["label"] = "Blur (px)", ["min"] = 0, ["max"] = 200, ["step"] = 1, ["defaultValue"] = 16, ["kind"] = "range" }, { ["key"] = "shadowSpread", ["label"] = "Spread (px)", ["min"] = -100, ["max"] = 100, ["step"] = 1, ["defaultValue"] = 0, ["kind"] = "range" }, { ["key"] = "shadowInset", ["label"] = "Inner shadow", ["defaultValue"] = false, ["kind"] = "toggle" } }, ["description"] = "Configurable drop or inner shadow with optional second colour." }, { ["tag"] = "_scroll", ["controls"] = { { ["key"] = "scrollDir", ["label"] = "Scroll direction", ["defaultValue"] = 0, ["kind"] = "select", ["options"] = { { ["label"] = "Auto", ["value"] = 0 }, { ["label"] = "Vertical", ["value"] = 1 }, { ["label"] = "Horizontal", ["value"] = 2 } } }, { ["key"] = "scrollBar", ["label"] = "Scrollbar thickness (px)", ["min"] = 0, ["max"] = 24, ["step"] = 1, ["defaultValue"] = 6, ["kind"] = "range" }, { ["key"] = "scrollExtL", ["label"] = "Window edge left (px)", ["min"] = -600, ["max"] = 600, ["step"] = 5, ["defaultValue"] = 0, ["kind"] = "range" }, { ["key"] = "scrollExtR", ["label"] = "Window edge right (px)", ["min"] = -600, ["max"] = 600, ["step"] = 5, ["defaultValue"] = 0, ["kind"] = "range" }, { ["key"] = "scrollExtT", ["label"] = "Window edge up (px)", ["min"] = -600, ["max"] = 600, ["step"] = 5, ["defaultValue"] = 0, ["kind"] = "range" }, { ["key"] = "scrollExtB", ["label"] = "Window edge down (px)", ["min"] = -600, ["max"] = 600, ["step"] = 5, ["defaultValue"] = 0, ["kind"] = "range" } }, ["description"] = "Scrolling window with auto or forced direction and editable edges." } }
+
+local toolbar = plugin:CreateToolbar("Framewisp Effects")
+local toolbarButton = toolbar:CreateButton("Effects", "Add and preview Framewisp effects", "rbxassetid://4458901886")
+local widgetInfo = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Right, false, false, 410, 680, 330, 420)
+local widget = plugin:CreateDockWidgetPluginGui("FramewispEffectsEditorDock", widgetInfo)
+widget.Title = "Framewisp Effects"
+
+local COLORS = {
+    bg = Color3.fromRGB(14, 10, 22),
+    card = Color3.fromRGB(27, 20, 39),
+    raised = Color3.fromRGB(39, 29, 53),
+    border = Color3.fromRGB(68, 52, 86),
+    text = Color3.fromRGB(247, 243, 252),
+    muted = Color3.fromRGB(177, 165, 190),
+    accent = Color3.fromRGB(197, 161, 237),
+    accentDark = Color3.fromRGB(80, 56, 103),
+    green = Color3.fromRGB(86, 210, 143),
+    red = Color3.fromRGB(240, 119, 137),
+}
+
+local function new(className: string, properties: {[string]: any}?, parent: Instance?): Instance
+    local instance = Instance.new(className)
+    if properties then
+        for key, value in pairs(properties) do
+            local target: any = instance
+            target[key] = value
+        end
+    end
+    if parent then instance.Parent = parent end
+    return instance
+end
+
+local function corner(object: Instance, radius: number?)
+    new("UICorner", { CornerRadius = UDim.new(0, radius or 7) }, object)
+end
+
+local function stroke(object: Instance, color: Color3?, transparency: number?)
+    new("UIStroke", { Color = color or COLORS.border, Transparency = transparency or 0, Thickness = 1 }, object)
+end
+
+local function pascal(key: string): string
+    return string.upper(string.sub(key, 1, 1)) .. string.sub(key, 2)
+end
+
+local function decodeTags(object: Instance): {string}
+    local ok, value = pcall(function() return HttpService:JSONDecode(object:GetAttribute("FWTags") or "[]") end)
+    return ok and type(value) == "table" and value or {}
+end
+
+local function hasTag(object: Instance, tag: string): boolean
+    for _, value in ipairs(decodeTags(object)) do if value == tag then return true end end
+    return false
+end
+
+local function setTag(object: Instance, tag: string, enabled: boolean)
+    local tags = decodeTags(object)
+    local output, found = {}, false
+    for _, value in ipairs(tags) do
+        if value == tag then found = true elseif not table.find(output, value) then table.insert(output, value) end
+    end
+    if enabled and not found then table.insert(output, tag) end
+    object:SetAttribute("FWTags", HttpService:JSONEncode(output))
+end
+
+local function selectedGui(): {GuiObject}
+    local result = {}
+    for _, object in ipairs(Selection:Get()) do if object:IsA("GuiObject") then table.insert(result, object) end end
+    return result
+end
+
+local function ensureGlobalRuntime()
+    local folder = ReplicatedStorage:FindFirstChild("FramewispEffects")
+    if folder and not folder:IsA("Folder") then folder:Destroy(); folder = nil end
+    if not folder then folder = new("Folder", { Name = "FramewispEffects" }, ReplicatedStorage) end
+    folder:SetAttribute("FWGenerated", true)
+    local expected = {}
+    for name, source in pairs(runtimeModules) do
+        expected[name] = true
+        local module = folder:FindFirstChild(name)
+        if module and not module:IsA("ModuleScript") then module:Destroy(); module = nil end
+        if not module then module = new("ModuleScript", { Name = name }, folder) end
+        module:SetAttribute("FWGenerated", true)
+        pcall(function() (module :: ModuleScript).Source = source end)
+    end
+    for _, child in ipairs(folder:GetChildren()) do
+        if child:IsA("ModuleScript") and child:GetAttribute("FWGenerated") and not expected[child.Name] then child:Destroy() end
+    end
+    local scripts = StarterPlayer:FindFirstChildOfClass("StarterPlayerScripts")
+    if not scripts then scripts = new("StarterPlayerScripts", { Name = "StarterPlayerScripts" }, StarterPlayer) end
+    local runtime = scripts:FindFirstChild("FramewispRuntime")
+    if runtime and not runtime:IsA("LocalScript") then runtime:Destroy(); runtime = nil end
+    if not runtime then runtime = new("LocalScript", { Name = "FramewispRuntime" }, scripts) end
+    runtime:SetAttribute("FWGenerated", true)
+    pcall(function() (runtime :: LocalScript).Source = runtimeSource end)
+end
+
+local root = new("Frame", { BackgroundColor3 = COLORS.bg, BorderSizePixel = 0, Size = UDim2.fromScale(1, 1) }, widget) :: Frame
+new("UIPadding", { PaddingTop = UDim.new(0, 12), PaddingBottom = UDim.new(0, 12), PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12) }, root)
+local rootLayout = new("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, root) :: UIListLayout
+
+local header = new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 42), LayoutOrder = 1 }, root) :: Frame
+new("TextLabel", { BackgroundTransparency = 1, Size = UDim2.new(1, -116, 0, 22), Font = Enum.Font.GothamBold, Text = "Framewisp Effects", TextColor3 = COLORS.text, TextSize = 18, TextXAlignment = Enum.TextXAlignment.Left }, header)
+new("TextLabel", { BackgroundTransparency = 1, Position = UDim2.fromOffset(0, 23), Size = UDim2.new(1, -116, 0, 17), Font = Enum.Font.Gotham, Text = "Select UI · add · tune · preview", TextColor3 = COLORS.muted, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left }, header)
+local previewButton = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0), Size = UDim2.fromOffset(108, 32), BackgroundColor3 = COLORS.accentDark, BorderSizePixel = 0, Font = Enum.Font.GothamBold, Text = "Preview: ON", TextColor3 = COLORS.text, TextSize = 11, AutoButtonColor = false }, header) :: TextButton
+corner(previewButton, 7)
+
+local selectionCard = new("Frame", { BackgroundColor3 = COLORS.card, BorderSizePixel = 0, Size = UDim2.new(1, 0, 0, 66), LayoutOrder = 2 }, root) :: Frame
+corner(selectionCard, 8); stroke(selectionCard)
+local selectedTitle = new("TextLabel", { BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 9), Size = UDim2.new(1, -24, 0, 20), Font = Enum.Font.GothamBold, Text = "No UI selected", TextColor3 = COLORS.text, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd }, selectionCard) :: TextLabel
+local selectedDetail = new("TextLabel", { BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 31), Size = UDim2.new(1, -24, 0, 25), Font = Enum.Font.Gotham, Text = "Choose one or more GUI objects in Explorer.", TextColor3 = COLORS.muted, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true }, selectionCard) :: TextLabel
+
+local filters = new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 34), LayoutOrder = 3 }, root) :: Frame
+local search = new("TextBox", { BackgroundColor3 = COLORS.card, BorderSizePixel = 0, Size = UDim2.new(1, -132, 1, 0), ClearTextOnFocus = false, Font = Enum.Font.Gotham, PlaceholderText = "Search 45 effects…", PlaceholderColor3 = COLORS.muted, Text = "", TextColor3 = COLORS.text, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left }, filters) :: TextBox
+corner(search, 7); stroke(search)
+new("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 8) }, search)
+local categoryButton = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0), Size = UDim2.fromOffset(124, 34), BackgroundColor3 = COLORS.raised, BorderSizePixel = 0, Font = Enum.Font.GothamBold, Text = "All effects ▾", TextColor3 = COLORS.text, TextSize = 11, AutoButtonColor = false }, filters) :: TextButton
+corner(categoryButton, 7); stroke(categoryButton)
+
+local list = new("ScrollingFrame", { AutomaticCanvasSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, BorderSizePixel = 0, CanvasSize = UDim2.new(), ScrollBarThickness = 5, ScrollBarImageColor3 = COLORS.accent, Size = UDim2.new(1, 0, 1, -176), LayoutOrder = 4 }, root) :: ScrollingFrame
+new("UIListLayout", { Padding = UDim.new(0, 7), SortOrder = Enum.SortOrder.LayoutOrder }, list)
+new("UIPadding", { PaddingRight = UDim.new(0, 5), PaddingBottom = UDim.new(0, 10) }, list)
+
+local status = new("TextLabel", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 18), LayoutOrder = 5, Font = Enum.Font.Gotham, Text = "Ready", TextColor3 = COLORS.muted, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd }, root) :: TextLabel
+
+local categories = { "All", "Buttons", "Entrances", "Loops", "Looks", "World" }
+local categoryIndex = 1
+local expandedTag: string? = nil
+local previewEnabled = true
+local rendering = false
+local renderEffects: () -> ()
+
+local categoryTags = {
+    Buttons = { _button=true, _smooth=true, _up=true, _turn=true, _squish=true, _ripple=true, _magnet=true, _select=true, _color=true, _glint=true, _burst=true, _pointer=true, _card=true, _lean=true },
+    Entrances = { _pop=true, _fadein=true, _drop=true, _reveal=true, _swing=true, _cascade=true },
+    Loops = { _spin=true, _rays=true, _pulse=true, _float=true, _jelly=true, _blink=true, _shake=true, _wiggle=true, _drift=true, _fall=true },
+    Looks = { _glow=true, _pixels=true, _shiny=true, _gleam=true, _stroke=true, _flow=true, _shadow=true },
+    World = { _3d=true, _tilt=true, _billboard=true, _surface=true, _prompt=true, _hold=true, _focus=true, _scroll=true },
+}
+
+local previewBases = setmetatable({}, { __mode = "k" })
+local previewArtifacts = setmetatable({}, { __mode = "k" })
+local previewClock = 0
+
+local function capture(object: GuiObject)
+    if previewBases[object] then return previewBases[object] end
+    local scale = object:FindFirstChild("FramewispEditorScale")
+    if not scale then scale = new("UIScale", { Name = "FramewispEditorScale" }, object) end
+    local colorProperty = (object:IsA("ImageLabel") or object:IsA("ImageButton")) and "ImageColor3" or (object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox")) and "TextColor3" or "BackgroundColor3"
+    local transparencyProperty = (object:IsA("ImageLabel") or object:IsA("ImageButton")) and "ImageTransparency" or (object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox")) and "TextTransparency" or "BackgroundTransparency"
+    local target: any = object
+    previewBases[object] = { Position = object.Position, Rotation = object.Rotation, Size = object.Size, Scale = (scale :: UIScale).Scale, ColorProperty = colorProperty, Color = target[colorProperty], TransparencyProperty = transparencyProperty, Transparency = target[transparencyProperty] }
+    return previewBases[object]
+end
+
+local function restorePreviews()
+    for object, base in pairs(previewBases) do
+        if object.Parent then
+            object.Position = base.Position; object.Rotation = base.Rotation; object.Size = base.Size
+            local target: any = object
+            target[base.ColorProperty] = base.Color; target[base.TransparencyProperty] = base.Transparency
+            local scale = object:FindFirstChild("FramewispEditorScale")
+            if scale and scale:IsA("UIScale") then scale.Scale = base.Scale; scale:Destroy() end
+        end
+    end
+    for artifact in pairs(previewArtifacts) do if artifact.Parent then artifact:Destroy() end end
+    previewBases = setmetatable({}, { __mode = "k" })
+    previewArtifacts = setmetatable({}, { __mode = "k" })
+end
+
+local function numberAttr(object: Instance, key: string, fallback: number): number
+    return tonumber(object:GetAttribute(pascal(key)) or object:GetAttribute(key)) or fallback
+end
+
+local function hexColor(value: any, fallback: Color3): Color3
+    if typeof(value) == "Color3" then return value end
+    if typeof(value) ~= "string" then return fallback end
+    local hex = string.gsub(value, "#", "")
+    if #hex ~= 6 then return fallback end
+    local number = tonumber(hex, 16); if not number then return fallback end
+    return Color3.fromRGB(math.floor(number / 65536) % 256, math.floor(number / 256) % 256, number % 256)
+end
+
+local function activeTags(object: Instance): {[string]: boolean}
+    local output = {}
+    for _, tag in ipairs(decodeTags(object)) do output[tag] = true end
+    return output
+end
+
+RunService.Heartbeat:Connect(function(delta)
+    if not widget.Enabled or not previewEnabled then return end
+    previewClock += delta
+    for _, object in ipairs(selectedGui()) do
+        local tags = activeTags(object)
+        local base = capture(object)
+        local scale = object:FindFirstChild("FramewispEditorScale") :: UIScale
+        object.Rotation = base.Rotation
+        object.Position = base.Position
+        local target: any = object
+        target[base.ColorProperty] = base.Color
+        target[base.TransparencyProperty] = base.Transparency
+        if tags._spin or tags._rays then
+            local speed = tags._rays and numberAttr(object, "raysSpeed", 25) or numberAttr(object, "spinSpeed", 120)
+            object.Rotation = base.Rotation + previewClock * speed
+        elseif tags._jelly then
+            object.Rotation = base.Rotation + math.sin(previewClock * math.pi * 2 * numberAttr(object, "jellySpeed", 1.2)) * numberAttr(object, "jellyAmp", 3)
+        elseif tags._wiggle then
+            object.Rotation = base.Rotation + math.sin(previewClock * math.pi * 4) * numberAttr(object, "wiggleAngle", 12)
+        elseif tags._turn then object.Rotation = base.Rotation + numberAttr(object, "turnAngle", -5)
+        elseif tags._tilt then object.Rotation = base.Rotation + numberAttr(object, "tiltY", -14) * .12 + numberAttr(object, "tiltX", 6) * .06
+        elseif tags._3d then object.Rotation = base.Rotation + math.sin(previewClock * 1.5) * numberAttr(object, "tiltMax", 8) end
+        if tags._float then
+            local distance, speed = numberAttr(object, "floatDist", 8), numberAttr(object, "floatSpeed", .6)
+            local angle = math.rad(numberAttr(object, "floatAngle", 0)); local value = math.sin(previewClock * math.pi * 2 * speed) * distance / 2
+            object.Position = base.Position + UDim2.fromOffset(math.sin(angle) * value, -math.cos(angle) * value)
+        elseif tags._drift then
+            local distance = (previewClock * numberAttr(object, "driftSpeed", 40)) % math.max(20, object.AbsoluteSize.X)
+            local angle = math.rad(numberAttr(object, "driftAngle", 270)); object.Position = base.Position + UDim2.fromOffset(math.sin(angle) * distance, -math.cos(angle) * distance)
+        elseif tags._shake then
+            local amplitude = numberAttr(object, "shakeAmp", 6); object.Position = base.Position + UDim2.fromOffset(math.sin(previewClock * 35) * amplitude, math.cos(previewClock * 41) * amplitude)
+        elseif tags._up then object.Position = base.Position - UDim2.fromOffset(0, numberAttr(object, "upDist", 6)) end
+        if tags._pulse or tags._rays then
+            local amplitude = (tags._rays and numberAttr(object, "raysPulse", 6) or numberAttr(object, "pulseAmp", 5)) / 100
+            scale.Scale = base.Scale * (1 + math.max(0, math.sin(previewClock * math.pi * 2 * numberAttr(object, "pulseSpeed", 1))) * amplitude)
+        elseif tags._jelly then
+            local wave = math.sin(previewClock * math.pi * 2 * numberAttr(object, "jellySpeed", 1.2))
+            scale.Scale = base.Scale * (1 + wave * .02)
+        elseif tags._smooth then scale.Scale = base.Scale * numberAttr(object, "hoverScale", 1.08)
+        elseif tags._button then scale.Scale = base.Scale * numberAttr(object, "pressScale", .985)
+        elseif tags._select then scale.Scale = base.Scale * numberAttr(object, "selectPop", 1.06)
+        else scale.Scale = base.Scale end
+        if tags._color then target[base.ColorProperty] = hexColor(object:GetAttribute("ColorPick") or object:GetAttribute("colorPick"), base.Color) end
+        if tags._blink then
+            local visibleFor, hiddenFor = numberAttr(object, "blinkOn", 1.2), numberAttr(object, "blinkOff", .8)
+            target[base.TransparencyProperty] = (previewClock % math.max(.1, visibleFor + hiddenFor)) > visibleFor and 1 or base.Transparency
+        end
+        if tags._glow then
+            local glow = object:FindFirstChild("FramewispEditorGlow")
+            if not glow then glow = new("UIStroke", { Name = "FramewispEditorGlow", Color = Color3.new(1, 1, 1) }, object); previewArtifacts[glow] = true end
+            if glow:IsA("UIStroke") then glow.Thickness = 1 + (1 + math.sin(previewClock * math.pi * 2 * numberAttr(object, "glowSpeed", .8))) * numberAttr(object, "glowSize", 12) / 8 end
+        end
+        if tags._flow or tags._stroke then
+            local gradient = object:FindFirstChild("FramewispEditorGradient")
+            if not gradient then gradient = new("UIGradient", { Name = "FramewispEditorGradient" }, object); previewArtifacts[gradient] = true end
+            if gradient:IsA("UIGradient") then
+                if tags._stroke and numberAttr(object, "strokeMode", 0) == 0 or tags._flow and numberAttr(object, "flowMove", 0) == 1 then
+                    gradient.Rotation = previewClock * (tags._stroke and numberAttr(object, "strokeRotate", 45) or numberAttr(object, "flowRotate", 180))
+                else
+                    local angle = math.rad(tags._stroke and numberAttr(object, "strokeDirection", 0) or numberAttr(object, "flowDirection", 0))
+                    local speed = tags._stroke and numberAttr(object, "strokeSpeed", .35) or numberAttr(object, "flowSpeed", .5)
+                    gradient.Offset = Vector2.new(math.cos(angle), math.sin(angle)) * ((previewClock * speed) % 2 - 1)
+                end
+            end
+        end
+    end
+end)
+
+local function setStatus(message: string, color: Color3?)
+    status.Text = message; status.TextColor3 = color or COLORS.muted
+end
+
+local function effectState(tag: string): (number, number)
+    local selected = selectedGui(); local active = 0
+    for _, object in ipairs(selected) do if hasTag(object, tag) then active += 1 end end
+    return active, #selected
+end
+
+local function otherEffectUsesKey(object: Instance, exceptTag: string, key: string): boolean
+    for _, effect in ipairs(effects) do
+        if effect.tag ~= exceptTag and hasTag(object, effect.tag) then
+            for _, control in ipairs(effect.controls) do if control.key == key then return true end end
+        end
+    end
+    return false
+end
+
+local function toggleEffect(effect)
+    local selected = selectedGui(); if #selected == 0 then setStatus("Select a GUI object first.", COLORS.red); return end
+    restorePreviews()
+    ensureGlobalRuntime()
+    local active = effectState(effect.tag); local enable = active < #selected
+    ChangeHistoryService:SetWaypoint("Before Framewisp effect")
+    for _, object in ipairs(selected) do
+        setTag(object, effect.tag, enable)
+        if enable then
+            for _, control in ipairs(effect.controls) do
+                local key = pascal(control.key)
+                if object:GetAttribute(key) == nil and object:GetAttribute(control.key) == nil then object:SetAttribute(key, control.defaultValue) end
+            end
+        else
+            for _, control in ipairs(effect.controls) do
+                if not otherEffectUsesKey(object, effect.tag, control.key) then object:SetAttribute(pascal(control.key), nil); object:SetAttribute(control.key, nil) end
+            end
+        end
+    end
+    ChangeHistoryService:SetWaypoint((enable and "Add " or "Remove ") .. effect.tag)
+    setStatus((enable and "Added " or "Removed ") .. effect.tag .. " on " .. #selected .. " object(s).", enable and COLORS.green or COLORS.muted)
+    renderEffects()
+end
+
+local function applyValue(control, value)
+    local selected = selectedGui(); if #selected == 0 then return end
+    ChangeHistoryService:SetWaypoint("Before Framewisp setting")
+    for _, object in ipairs(selected) do object:SetAttribute(pascal(control.key), value) end
+    ChangeHistoryService:SetWaypoint("Set " .. control.label)
+    setStatus(control.label .. " updated on " .. #selected .. " object(s).", COLORS.green)
+end
+
+local function valueFor(control)
+    local selected = selectedGui(); if #selected == 0 then return control.defaultValue end
+    local value = selected[1]:GetAttribute(pascal(control.key))
+    if value == nil then value = selected[1]:GetAttribute(control.key) end
+    return value == nil and control.defaultValue or value
+end
+
+local function previewOnce(effect)
+    local selected = selectedGui(); if #selected == 0 then setStatus("Select a GUI object first.", COLORS.red); return end
+    previewEnabled = true; previewButton.Text = "Preview: ON"
+    for _, object in ipairs(selected) do
+        local base = capture(object); local scale = object:FindFirstChild("FramewispEditorScale") :: UIScale
+        if effect.tag == "_pop" or effect.tag == "_reveal" or effect.tag == "_swing" then
+            scale.Scale = numberAttr(object, effect.tag == "_pop" and "popFrom" or effect.tag == "_reveal" and "revealFrom" or "swingFrom", .6)
+            TweenService:Create(scale, TweenInfo.new(numberAttr(object, effect.tag == "_pop" and "popTime" or effect.tag == "_reveal" and "revealTime" or "swingTime", .5), Enum.EasingStyle.Back), { Scale = base.Scale }):Play()
+        elseif effect.tag == "_drop" then
+            object.Position = base.Position - UDim2.fromOffset(0, numberAttr(object, "dropHeight", 160))
+            TweenService:Create(object, TweenInfo.new(numberAttr(object, "dropTime", .6), Enum.EasingStyle.Bounce), { Position = base.Position }):Play()
+        elseif effect.tag == "_shake" then
+            task.spawn(function() local started=time(); while object.Parent and time()-started<.5 do object.Position=base.Position+UDim2.fromOffset(math.random(-6,6),math.random(-6,6)); task.wait() end; if object.Parent then object.Position=base.Position end end)
+        elseif effect.tag == "_wiggle" then
+            task.spawn(function() local started=time(); while object.Parent and time()-started<.65 do local elapsed=time()-started;object.Rotation=base.Rotation+math.sin(elapsed*math.pi*8)*numberAttr(object,"wiggleAngle",12)*(1-elapsed/.65);task.wait() end;if object.Parent then object.Rotation=base.Rotation end end)
+        else
+            scale.Scale = base.Scale * 1.08
+            TweenService:Create(scale, TweenInfo.new(.32, Enum.EasingStyle.Back), { Scale = base.Scale }):Play()
+        end
+    end
+    setStatus("Previewed " .. effect.tag .. ".", COLORS.accent)
+end
+
+local function controlRow(parent: Instance, control)
+    local row = new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, -20, 0, 31) }, parent) :: Frame
+    new("TextLabel", { BackgroundTransparency = 1, Size = UDim2.new(.57, -4, 1, 0), Font = Enum.Font.Gotham, Text = control.label, TextColor3 = COLORS.muted, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd }, row)
+    local kind = control.kind or "range"
+    if kind == "toggle" then
+        local value = valueFor(control) == true
+        local button = new("TextButton", { AnchorPoint = Vector2.new(1, .5), Position = UDim2.fromScale(1, .5), Size = UDim2.fromOffset(78, 25), BackgroundColor3 = value and COLORS.accentDark or COLORS.raised, BorderSizePixel = 0, Font = Enum.Font.GothamBold, Text = value and "ON" or "OFF", TextColor3 = value and COLORS.accent or COLORS.muted, TextSize = 10, AutoButtonColor = false }, row) :: TextButton
+        corner(button, 6); button.Activated:Connect(function() applyValue(control, not value); renderEffects() end)
+    elseif kind == "select" then
+        local options = control.options or {}; local current = valueFor(control); local index = 1
+        for candidate, option in ipairs(options) do if option.value == current then index = candidate end end
+        local button = new("TextButton", { AnchorPoint = Vector2.new(1, .5), Position = UDim2.fromScale(1, .5), Size = UDim2.fromOffset(128, 25), BackgroundColor3 = COLORS.raised, BorderSizePixel = 0, Font = Enum.Font.Gotham, Text = options[index] and options[index].label or tostring(current), TextColor3 = COLORS.text, TextSize = 10, AutoButtonColor = false }, row) :: TextButton
+        corner(button, 6); button.Activated:Connect(function() index = index % math.max(1, #options) + 1; if options[index] then applyValue(control, options[index].value) end; renderEffects() end)
+    else
+        local box = new("TextBox", { AnchorPoint = Vector2.new(1, .5), Position = UDim2.fromScale(1, .5), Size = UDim2.fromOffset(128, 25), BackgroundColor3 = COLORS.raised, BorderSizePixel = 0, ClearTextOnFocus = false, Font = Enum.Font.Code, Text = tostring(valueFor(control)), TextColor3 = COLORS.text, TextSize = 10 }, row) :: TextBox
+        corner(box, 6)
+        box.FocusLost:Connect(function()
+            local value: any = box.Text
+            if kind == "range" or kind == "angle" then
+                value = tonumber(box.Text)
+                if value == nil then box.Text = tostring(valueFor(control)); return end
+                if control.min then value = math.max(control.min, value) end
+                if control.max then value = math.min(control.max, value) end
+            end
+            applyValue(control, value); box.Text = tostring(value)
+        end)
+    end
+end
+
+renderEffects = function()
+    if rendering then return end; rendering = true
+    for _, child in ipairs(list:GetChildren()) do if child:IsA("GuiObject") then child:Destroy() end end
+    local query = string.lower(search.Text); local category = categories[categoryIndex]; local order = 0
+    for _, effect in ipairs(effects) do
+        local pretty = string.gsub(string.sub(effect.tag, 2), "(%l)(%u)", "%1 %2")
+        local matchesSearch = query == "" or string.find(string.lower(effect.tag .. " " .. pretty .. " " .. (effect.description or "")), query, 1, true) ~= nil
+        local matchesCategory = category == "All" or categoryTags[category] and categoryTags[category][effect.tag]
+        if matchesSearch and matchesCategory then
+            order += 1
+            local active, total = effectState(effect.tag); local expanded = expandedTag == effect.tag
+            local height = expanded and (122 + #effect.controls * 31) or 48
+            local card = new("Frame", { AutomaticSize = Enum.AutomaticSize.None, BackgroundColor3 = COLORS.card, BorderSizePixel = 0, Size = UDim2.new(1, -2, 0, height), LayoutOrder = order }, list) :: Frame
+            corner(card, 8); stroke(card, active > 0 and COLORS.accent or COLORS.border, active > 0 and .1 or .3)
+            local title = new("TextButton", { BackgroundTransparency = 1, Position = UDim2.fromOffset(10, 4), Size = UDim2.new(1, -126, 0, 40), Font = Enum.Font.GothamBold, Text = (expanded and "▾  " or "▸  ") .. effect.tag, TextColor3 = active > 0 and COLORS.accent or COLORS.text, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, AutoButtonColor = false }, card) :: TextButton
+            local stateText = total == 0 and "ADD" or active == total and "REMOVE" or active > 0 and "ADD ALL" or "ADD"
+            local add = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 8), Size = UDim2.fromOffset(72, 28), BackgroundColor3 = active == total and total > 0 and Color3.fromRGB(78, 39, 52) or COLORS.accentDark, BorderSizePixel = 0, Font = Enum.Font.GothamBold, Text = stateText, TextColor3 = active == total and total > 0 and COLORS.red or COLORS.accent, TextSize = 9, AutoButtonColor = false }, card) :: TextButton
+            corner(add, 6); add.Activated:Connect(function() toggleEffect(effect) end)
+            title.Activated:Connect(function() expandedTag = expanded and nil or effect.tag; renderEffects() end)
+            if expanded then
+                local preview = new("TextButton", { Position = UDim2.fromOffset(10, 43), Size = UDim2.fromOffset(76, 24), BackgroundColor3 = COLORS.raised, BorderSizePixel = 0, Font = Enum.Font.GothamBold, Text = "PREVIEW", TextColor3 = COLORS.muted, TextSize = 9, AutoButtonColor = false }, card) :: TextButton
+                corner(preview, 5); preview.Activated:Connect(function() previewOnce(effect) end)
+                new("TextLabel", { BackgroundTransparency = 1, Position = UDim2.fromOffset(96, 43), Size = UDim2.new(1, -106, 0, 43), Font = Enum.Font.Gotham, Text = effect.description or "", TextColor3 = COLORS.muted, TextSize = 10, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top }, card)
+                local controls = new("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffset(10, 92), Size = UDim2.new(1, -20, 0, #effect.controls * 31) }, card) :: Frame
+                new("UIListLayout", { Padding = UDim.new(0, 0), SortOrder = Enum.SortOrder.LayoutOrder }, controls)
+                for _, control in ipairs(effect.controls) do controlRow(controls, control) end
+            end
+        end
+    end
+    rendering = false
+end
+
+local function refreshSelection()
+    restorePreviews()
+    local selected = selectedGui()
+    if #selected == 0 then selectedTitle.Text = "No UI selected"; selectedDetail.Text = "Choose one or more GUI objects in Explorer."
+    elseif #selected == 1 then selectedTitle.Text = selected[1].Name; selectedDetail.Text = selected[1].ClassName .. " · " .. #decodeTags(selected[1]) .. " active Framewisp tag(s)"
+    else selectedTitle.Text = tostring(#selected) .. " UI objects selected"; selectedDetail.Text = "Changes apply to every selected GUI object." end
+    renderEffects()
+end
+
+toolbarButton.Click:Connect(function() widget.Enabled = not widget.Enabled end)
+widget:GetPropertyChangedSignal("Enabled"):Connect(function() if widget.Enabled then ensureGlobalRuntime(); refreshSelection() else restorePreviews() end end)
+Selection.SelectionChanged:Connect(refreshSelection)
+search:GetPropertyChangedSignal("Text"):Connect(renderEffects)
+categoryButton.Activated:Connect(function() categoryIndex = categoryIndex % #categories + 1; categoryButton.Text = categories[categoryIndex] .. " ▾"; renderEffects() end)
+previewButton.Activated:Connect(function() previewEnabled = not previewEnabled; previewButton.Text = previewEnabled and "Preview: ON" or "Preview: OFF"; if not previewEnabled then restorePreviews() end end)
+
+ensureGlobalRuntime()
+refreshSelection()
+]]></ProtectedString><string name="Name">FramewispEffectsEditor</string><bool name="Disabled">false</bool><Content name="LinkedSource"><null></null></Content></Properties></Item></roblox>
